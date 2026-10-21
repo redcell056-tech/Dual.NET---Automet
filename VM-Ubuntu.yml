@@ -1,9 +1,0 @@
----
-- name: Playbook de prueba
-  hosts: all
-  gather_facts: no
-  tasks:
-    - name: Hola
-      ansible.builtin.debug:
-        msg: "Hola desde DualNet en GitHub"
-           
