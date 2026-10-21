@@ -1,0 +1,8 @@
+---
+- name: priena
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Debug
+      ansible.builtin.debug:
+        msg: "Hola desde priena"
