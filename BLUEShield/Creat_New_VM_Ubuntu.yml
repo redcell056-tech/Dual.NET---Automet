@@ -76,4 +76,4 @@
                 packages:
                   - openssh-server
           - key: "guestinfo.userdata.encoding"
-            value: "base64"
+            value: "base64" 
