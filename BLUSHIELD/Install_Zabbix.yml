@@ -1,8 +1,0 @@
----
-- name: Install Zabbix
-  hosts: zabbix
-  gather_facts: yes
-  tasks:
-    - name: Tarea de prueba
-      ansible.builtin.debug:
-        msg: "Ejecutando en {{ inventory_hostname }}"
