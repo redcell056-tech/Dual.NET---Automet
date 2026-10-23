@@ -1,5 +1,5 @@
 ---
-- name: Crear VM AlmaLinux (Configuración Forzada)
+- name: Crear VM AlmaLinux (Forzando BIOS Legacy y Boot Order)
   hosts: localhost
   connection: local
   gather_facts: no
@@ -7,20 +7,18 @@
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
     esxipass: "!Urielito2001"
-    vm_name: "alma-server-final"  # Nombre nuevo para evitar conflictos
+    vm_name: "alma-server-final-02"  # Nombre nuevo
     datastore: "datastore1"
-    # Usando el nombre exacto que aparece en tu ls -la
     iso_rel_path: "ISOS/AlmaLinux-9.6-x86_64-minimal (2).iso"
 
   tasks:
-    # 1. Crear la máquina virtual
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
         esxiusername: "{{ esxiuser }}"
         esxipassword: "{{ esxipass }}"
         name: "{{ vm_name }}"
-        guest_id: "rhel9_64Guest"   # AlmaLinux 9 usa el mismo ID que RHEL 9
+        guest_id: "rhel9_64Guest"
         datastore: "{{ datastore }}"
         hardware:
           memory_mb: 2048
@@ -39,33 +37,33 @@
       vars:
         ansible_python_interpreter: /usr/local/bin/python
 
-    # 2. Corregir el .vmx con precisión quirúrgica y encender
-    - name: Corregir .vmx y encender la VM
+    - name: Forzar BIOS Legacy y orden de arranque correcto
       shell: |
         set -e
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
-        
-        # Apagamos por si el módulo la encendió
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 3
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # --- LIMPIEZA EXTREMA ---
+        # Limpieza radical
         grep -v -E "ide[01]:[0-9]|sata[0-9]:[0-9]|cdrom|firmware|bios\.boot" "$VMX" > "${VMX}.tmp"
         mv "${VMX}.tmp" "$VMX"
 
-        # --- ESCRITURA DE LA RECETA EXACTA (Receta Zabbix) ---
+        # Escritura de configuración con BIOS forzado y boot order
         cat >> "$VMX" << 'EOF'
+        firmware = "bios"
         ide0:0.present = "TRUE"
         ide0:0.deviceType = "cdrom-image"
         ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        ide0:0.startConnected = "TRUE"
+        bios.bootOrder = "cdrom,hd"
+        bios.bootDeviceClasses = "allow:cd,hd"
         EOF
 
-        echo "=== Configuración final en el .vmx ==="
-        grep -E "ide0:0" "$VMX"
+        echo "=== Configuración final ==="
+        grep -E "firmware|ide0:0|bios.boot" "$VMX"
 
-        # Recargamos la configuración y encendemos
         vim-cmd vmsvc/reload $VMID
         sleep 3
         vim-cmd vmsvc/power.on $VMID
