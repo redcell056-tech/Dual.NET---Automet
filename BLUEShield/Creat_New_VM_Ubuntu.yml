@@ -1,92 +1,93 @@
 ---
-- name: Crear VM Ubuntu con autoinstall via SSH + ISO de seed
+- name: Crear VM Rocky Linux en ESXi via SSH (ESXi 8)
   hosts: localhost
   connection: local
   gather_facts: no
   vars:
-    esxiaddr: "{{ ansible_host }}"
-    esxiuser: "{{ ansible_user }}"
-    esxipass: "{{ ansible_password }}"
-    vm_name: "ubuntu-auto"
+    esxiaddr: "192.168.1.67"
+    esxiuser: "root"
+    esxipass: "!Urielito2001"
+    vm_name: "rocky-gui-01"
     datastore: "datastore1"
-    iso_path: "datastore1/ISOS/ubuntu-24.04.2-live-server-amd64.iso"
-    seed_iso_datastore: "datastore1/{{ vm_name }}/seed.iso"
-    seed_iso_local: "/tmp/seed.iso"
+    iso_rel_path: "ISOS/Rocky-9.6-x86_64-minimal.iso"
 
   tasks:
-    - name: 1. Generar ISO de seed con user-data
-      ansible.builtin.shell: |
-        mkdir -p /tmp/seed_build
-        cat > /tmp/seed_build/user-data <<'EOF'
-        #cloud-config
-        autoinstall:
-          version: 1
-          identity:
-            hostname: ubuntu-auto
-            username: ubuntu
-            password: "$6$rounds=4096$saltsalt$hash..."
-          ssh:
-            install-server: true
-        EOF
-        cat > /tmp/seed_build/meta-data <<'EOF'
-        instance-id: ubuntu-auto-01
-        local-hostname: ubuntu-auto
-        EOF
-        genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock /tmp/seed_build/user-data /tmp/seed_build/meta-data
-
-    - name: 2. Crear VM con zaki_lknr.esxissh (primer CD: ISO instalación)
+    # 1. Crear la VM (aunque el CD-ROM quede mal configurado)
+    - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
         esxiusername: "{{ esxiuser }}"
         esxipassword: "{{ esxipass }}"
         name: "{{ vm_name }}"
-        guest_id: "ubuntu64Guest"
+        guest_id: "centos8_64Guest"
         datastore: "{{ datastore }}"
         hardware:
-          memory_mb: 1024
-          num_cpus: 1
+          memory_mb: 2048
+          num_cpus: 2
         disk:
           - size_gb: 20
             type: thin
         networks:
           - name: "VM Network"
-            device_type: vmxnet3
+            device_type: "vmxnet3"
         cdrom:
-          - type: iso
-            iso_path: "{{ iso_path }}"
+          - type: "iso"
+            iso_path: "{{ iso_rel_path }}"
         state: present
+      register: vm_result
+      vars:
+        ansible_python_interpreter: /usr/local/bin/python
 
-    - name: 3. Subir ISO de seed al datastore por SFTP (Paramiko)
-      ansible.builtin.shell: |
-        python3 - << 'PYEOF'
-        import paramiko
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect("{{ esxiaddr }}", username="{{ esxiuser }}", password="{{ esxipass }}")
-        sftp = client.open_sftp()
-        sftp.put("{{ seed_iso_local }}", "/vmfs/volumes/{{ datastore }}/{{ vm_name }}/seed.iso")
-        sftp.close()
-        client.close()
-        PYEOF
+    - name: Mostrar resultado de creación
+      debug:
+        msg: "VM creada: {{ vm_result }}"
 
-    - name: 4. Añadir segundo CD-ROM (seed) al vmx por SSH
-      ansible.builtin.shell: |
-        python3 - << 'PYEOF'
-        import paramiko
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect("{{ esxiaddr }}", username="{{ esxiuser }}", password="{{ esxipass }}")
-        vmx = "/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
-        cmd = f'echo "sata0:1.present = \\"TRUE\\"" >> {vmx}; echo "sata0:1.deviceType = \\"cdrom-image\\"" >> {vmx}; echo "sata0:1.fileName = \\"/vmfs/volumes/{{ datastore }}/{{ vm_name }}/seed.iso\\"" >> {vmx}'
-        stdin, stdout, stderr = client.exec_command(cmd)
-        print(stderr.read().decode())
-        client.close()
-        PYEOF
+    # 2. Corregir el .vmx directamente en el ESXi
+    - name: Corregir CD-ROM y orden de arranque en el ESXi
+      shell: |
+        set -e
+        VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
+        if [ -z "$VMID" ]; then
+          echo "ERROR: No se encontró la VM {{ vm_name }}"
+          exit 1
+        fi
+        echo "VMID detectado: $VMID"
 
-    - name: 5. Encender la VM
-      zaki_lknr.esxissh.esxissh_guest_power:
-        esxiaddress: "{{ esxiaddr }}"
-        esxiusername: "{{ esxiuser }}"
-        esxipassword: "{{ esxipass }}"
-        name: "{{ vm_name }}"
-        state: poweredon
+        # Apagar si está encendida
+        vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+        sleep 2
+
+        VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
+
+        # Limpiar cualquier configuración previa de CD-ROM y boot order
+        sed -i '/^ide[01]:[0-9]\./d' "$VMX"
+        sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
+        sed -i '/^bios.bootOrder/d' "$VMX"
+
+        # Agregar bloque SATA con el ISO conectado
+        cat >> "$VMX" << 'EOF'
+        sata0.present = "TRUE"
+        sata0:0.present = "TRUE"
+        sata0:0.deviceType = "cdrom-image"
+        sata0:0.fileName = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        sata0:0.startConnected = "TRUE"
+        sata0:0.clientDevice = "FALSE"
+        bios.bootOrder = "cdrom,hd"
+        EOF
+
+        echo "=== Configuración aplicada ==="
+        grep -E "sata0|bios.bootOrder" "$VMX"
+
+        # Recargar y encender
+        vim-cmd vmsvc/reload $VMID
+        sleep 2
+        vim-cmd vmsvc/power.on $VMID
+
+        echo "VM encendida correctamente."
+      args:
+        executable: /bin/sh
+      delegate_to: "{{ esxiaddr }}"
+      vars:
+        ansible_ssh_user: "{{ esxiuser }}"
+        ansible_ssh_pass: "{{ esxipass }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
