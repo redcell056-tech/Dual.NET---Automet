@@ -1,5 +1,5 @@
 ---
-- name: Crear VM Rocky Linux en ESXi via SSH (ESXi 8)
+- name: Crear VM (Prueba con Ubuntu) en ESXi via SSH
   hosts: localhost
   connection: local
   gather_facts: no
@@ -9,19 +9,18 @@
     esxipass: "!Urielito2001"
     vm_name: "rocky-gui-01"
     datastore: "datastore1"
-    iso_rel_path: "ISOS/Rocky-9.6-x86_64-minimal.iso"
+    # ⚠️ Usando el nombre exacto que me mostraste
+    iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
 
   tasks:
-    # ---------------------------------------------------------
-    # 1. Crear la VM con el módulo (mínimos requisitos)
-    # ---------------------------------------------------------
+    # 1. Crear la VM
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
         esxiusername: "{{ esxiuser }}"
         esxipassword: "{{ esxipass }}"
         name: "{{ vm_name }}"
-        guest_id: "centos8_64Guest"
+        guest_id: "ubuntu64Guest"  # Cambiado a Ubuntu
         datastore: "{{ datastore }}"
         hardware:
           memory_mb: 2048
@@ -44,13 +43,10 @@
       debug:
         msg: "VM creada correctamente."
 
-    # ---------------------------------------------------------
     # 2. Corregir el .vmx a fondo vía SSH y encender la VM
-    # ---------------------------------------------------------
     - name: Corregir CD-ROM y orden de arranque en el ESXi
       shell: |
         set -e
-        # 1. Buscar el VMID
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
         if [ -z "$VMID" ]; then
           echo "ERROR: No se encontró la VM {{ vm_name }}"
@@ -58,20 +54,19 @@
         fi
         echo "VMID detectado: $VMID"
 
-        # 2. Apagar la VM si está encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # 3. Limpieza profunda de líneas conflictivas anteriores
+        # Limpieza profunda (borra TODO lo que tenga que ver con CD-ROM y arranque)
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
         sed -i '/^bios.bootDeviceClasses/d' "$VMX"
         sed -i '/^firmware/d' "$VMX"
 
-        # 4. Insertar configuración correcta (Ruta con corchetes, fileName con N, BIOS mode)
+        # Insertar configuración correcta (Forzando BIOS y ruta con corchetes)
         cat >> "$VMX" << 'EOF'
         firmware = "bios"
         ide0:0.present = "TRUE"
@@ -85,7 +80,6 @@
         echo "=== Configuración aplicada ==="
         grep -E "firmware|ide0:0|bios.boot" "$VMX"
 
-        # 5. Recargar la configuración y encender la VM
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
@@ -94,7 +88,7 @@
       args:
         executable: /bin/sh
       delegate_to: "{{ esxiaddr }}"
-      connection: ssh  # <-- CRÍTICO: Fuerza la conexión SSH al ESXi
+      connection: ssh
       vars:
         ansible_ssh_user: "{{ esxiuser }}"
         ansible_ssh_pass: "{{ esxipass }}"
