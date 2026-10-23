@@ -1,5 +1,5 @@
 ---
-- name: Crear VM Ubuntu Server en ESXi via SSH (ESXi 8)
+- name: Crear VM Ubuntu con la receta de Zabbix
   hosts: localhost
   connection: local
   gather_facts: no
@@ -7,28 +7,25 @@
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
     esxipass: "!Urielito2001"
-    vm_name: "ubuntu-gui-05"  # Nombre nuevo para evitar conflictos
+    vm_name: "ubuntu-gui-final"
     datastore: "datastore1"
-    # Ruta relativa al datastore (confirmada en tu ls -la)
     iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
 
   tasks:
-    # ---------------------------------------------------------
-    # 1. Crear la VM con los mínimos requisitos
-    # ---------------------------------------------------------
+    # 1. Crear la VM
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
         esxiusername: "{{ esxiuser }}"
         esxipassword: "{{ esxipass }}"
         name: "{{ vm_name }}"
-        guest_id: "ubuntu64Guest"  # ID correcto para Ubuntu
+        guest_id: "ubuntu64Guest"
         datastore: "{{ datastore }}"
         hardware:
-          memory_mb: 2048          # 2 GB RAM
-          num_cpus: 2              # 2 vCPUs
+          memory_mb: 2048
+          num_cpus: 2
         disk:
-          - size_gb: 20            # 20 GB de disco
+          - size_gb: 20
             type: thin
         networks:
           - name: "VM Network"
@@ -41,57 +38,37 @@
       vars:
         ansible_python_interpreter: /usr/local/bin/python
 
-    - name: Mostrar resultado de creación
-      debug:
-        msg: "VM Ubuntu creada correctamente."
-
-    # ---------------------------------------------------------
-    # 2. Corregir el .vmx vía SSH para forzar el arranque del ISO
-    # ---------------------------------------------------------
-    - name: Corregir CD-ROM y orden de arranque en el ESXi
+    # 2. Corregir el .vmx para que quede IGUAL que Zabbix
+    - name: Corregir CD-ROM (Estilo Zabbix) en el ESXi
       shell: |
         set -e
-        # 1. Buscar el VMID
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
-        if [ -z "$VMID" ]; then
-          echo "ERROR: No se encontró la VM {{ vm_name }}"
-          exit 1
-        fi
-        echo "VMID detectado: $VMID"
-
-        # 2. Apagar la VM si está encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # 3. Limpieza profunda de configuraciones previas de CD-ROM y arranque
+        # 1. Limpiamos cualquier cosa que haya puesto Ansible
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
+        sed -i '/^firmware/d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
         sed -i '/^bios.bootDeviceClasses/d' "$VMX"
-        sed -i '/^firmware/d' "$VMX"
 
-        # 4. Insertar configuración correcta (Forzando BIOS y ruta con corchetes)
+        # 2. Escribimos EXACTAMENTE lo que tiene Zabbix
         cat >> "$VMX" << 'EOF'
-        firmware = "bios"
         ide0:0.present = "TRUE"
         ide0:0.deviceType = "cdrom-image"
-        ide0:0.fileName = "[{{ datastore }}] {{ iso_rel_path }}"
-        ide0:0.startConnected = "TRUE"
-        bios.bootOrder = "cdrom,hd"
-        bios.bootDeviceClasses = "allow:cd,hd"
+        ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
         EOF
 
-        echo "=== Configuración aplicada ==="
-        grep -E "firmware|ide0:0|bios.boot" "$VMX"
+        echo "=== Configuración final aplicada ==="
+        grep -E "ide0:0" "$VMX"
 
-        # 5. Recargar la configuración y encender la VM
+        # 3. Encendemos
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
-
-        echo "VM encendida correctamente."
       args:
         executable: /bin/sh
       delegate_to: "{{ esxiaddr }}"
