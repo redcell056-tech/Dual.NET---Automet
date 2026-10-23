@@ -1,5 +1,5 @@
 ---
-- name: Crear VM Ubuntu en ESXi vía SSH con autoinstall (ESXi gratuito)
+- name: Crear VM Ubuntu en ESXi vía SSH + Paramiko + ISO de seed (sin API)
   hosts: localhost
   gather_facts: no
   vars:
@@ -12,6 +12,8 @@
     vmx_path: "{{ vm_dir }}/{{ vm_name }}.vmx"
     vmdk_path: "{{ vm_dir }}/{{ vm_name }}.vmdk"
     iso_path: "[datastore1] ISOS/ubuntu-24.04.2-live-server-amd64.iso"
+    seed_iso_local: "/tmp/seed.iso"
+    seed_iso_remote: "{{ vm_dir }}/seed.iso"
     vm_mem_mb: 1024
     vm_cpus: 1
     vm_net: "VM Network"
@@ -27,125 +29,105 @@
           install-server: true
 
   tasks:
-    - name: Codificar userdata y metadata en base64
-      ansible.builtin.set_fact:
-        userdata_b64: "{{ userdata_content | b64encode }}"
-        metadata_b64: "{{ {'instance-id': 'ubuntu-auto-01'} | to_json | b64encode }}"
-
-    - name: 1. Crear directorio de la VM
+    - name: 1. Generar ISO de seed (local, en el backend)
       ansible.builtin.shell: |
-        mkdir -p "{{ vm_dir }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        mkdir -p /tmp/seed_build
+        cat > /tmp/seed_build/user-data <<'USERDATAEOF'
+        {{ userdata_content }}
+        USERDATAEOF
+        cat > /tmp/seed_build/meta-data <<'METADATAEOF'
+        instance-id: ubuntu-auto-01
+        local-hostname: ubuntu-auto
+        METADATAEOF
+        genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock /tmp/seed_build/user-data /tmp/seed_build/meta-data
 
-    - name: 2. Crear disco virtual thin de 20G
+    - name: 2. Crear VM, subir ISO y configurar vmx usando Paramiko (SSH + SFTP)
       ansible.builtin.shell: |
-        vmkfstools -c 20G -a lsilogic -d thin "{{ vmdk_path }}"
-      args:
-        creates: "{{ vmdk_path }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+        python3 - << 'PYEOF'
+        import paramiko, os
 
-    - name: 3. Crear VM ficticia (genera esqueleto vmx)
-      ansible.builtin.shell: |
-        vim-cmd vmsvc/createdummyvm "{{ vm_name }}" "/vmfs/volumes/{{ datastore }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+        host = "{{ esxi_host }}"
+        user = "{{ esxi_user }}"
+        pwd  = "{{ esxi_pass }}"
+        vm_name = "{{ vm_name }}"
+        vm_dir = "{{ vm_dir }}"
+        vmx_path = "{{ vmx_path }}"
+        vmdk_path = "{{ vmdk_path }}"
+        iso_path = "{{ iso_path }}"
+        seed_local = "{{ seed_iso_local }}"
+        seed_remote = "{{ seed_iso_remote }}"
+        mem = "{{ vm_mem_mb }}"
+        cpus = "{{ vm_cpus }}"
+        net = "{{ vm_net }}"
 
-    - name: 4. Escribir configuración completa del vmx
-      ansible.builtin.shell: |
-        cat > "{{ vmx_path }}" <<'VMXEOF'
-        .encoding = "UTF-8"
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(host, username=user, password=pwd)
+
+        def run(cmd):
+            stdin, stdout, stderr = client.exec_command(cmd)
+            out = stdout.read().decode()
+            err = stderr.read().decode()
+            if err:
+                print(f"STDERR: {err}")
+            return out
+
+        # Crear directorio
+        run(f'mkdir -p "{vm_dir}"')
+
+        # Crear disco (si no existe)
+        if not run(f'test -f "{vmdk_path}" && echo exists').strip() == "exists":
+            run(f'vmkfstools -c 20G -a lsilogic -d thin "{vmdk_path}"')
+
+        # Crear esqueleto vmx
+        run(f'vim-cmd vmsvc/createdummyvm "{vm_name}" "/vmfs/volumes/{{ datastore }}"')
+
+        # Subir la ISO de seed por SFTP
+        sftp = client.open_sftp()
+        sftp.put(seed_local, seed_remote)
+        sftp.close()
+
+        # Escribir el vmx con dos CD-ROM
+        vmx_content = f'''.encoding = "UTF-8"
         config.version = "8"
         virtualHW.version = "20"
-        displayName = "{{ vm_name }}"
+        displayName = "{vm_name}"
         guestOS = "ubuntu-64"
-        numvcpus = "{{ vm_cpus }}"
-        memSize = "{{ vm_mem_mb }}"
+        numvcpus = "{cpus}"
+        memSize = "{mem}"
 
         scsi0.present = "TRUE"
         scsi0.virtualDev = "lsilogic"
         scsi0:0.present = "TRUE"
-        scsi0:0.fileName = "{{ vm_name }}.vmdk"
+        scsi0:0.fileName = "{vm_name}.vmdk"
         scsi0:0.deviceType = "scsi-hardDisk"
 
         ethernet0.present = "TRUE"
         ethernet0.virtualDev = "vmxnet3"
-        ethernet0.networkName = "{{ vm_net }}"
+        ethernet0.networkName = "{net}"
         ethernet0.addressType = "generated"
 
         sata0.present = "TRUE"
         sata0:0.present = "TRUE"
         sata0:0.deviceType = "cdrom-image"
-        sata0:0.fileName = "{{ iso_path }}"
-        VMXEOF
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+        sata0:0.fileName = "{iso_path}"
 
-    - name: 5. Verificar si la VM ya está registrada (por nombre)
-      ansible.builtin.shell: |
-        vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}'
-      delegate_to: "{{ esxi_host }}"
-      register: existing_vmid
-      changed_when: false
-      failed_when: false
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+        sata0:1.present = "TRUE"
+        sata0:1.deviceType = "cdrom-image"
+        sata0:1.fileName = "{seed_remote}"
+        '''
+        run(f'cat > "{vmx_path}" <<\'VMXEOF\'\n{vmx_content}\nVMXEOF')
 
-    - name: 5b. Registrar la VM solo si no existe
-      ansible.builtin.shell: |
-        vim-cmd solo/registervm "{{ vmx_path }}"
-      delegate_to: "{{ esxi_host }}"
-      when: existing_vmid.stdout == ""
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+        # Registrar si no está registrada
+        existing = run(f'vim-cmd vmsvc/getallvms | grep -w "{vm_name}" | awk \'{{print $1}}\'').strip()
+        if not existing:
+            run(f'vim-cmd solo/registervm "{vmx_path}"')
+            existing = run(f'vim-cmd vmsvc/getallvms | grep -w "{vm_name}" | awk \'{{print $1}}\'').strip()
 
-    - name: 6. Obtener vmid de la VM
-      ansible.builtin.shell: |
-        vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}'
-      delegate_to: "{{ esxi_host }}"
-      register: vmid_result
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+        # Encender
+        run(f'vim-cmd vmsvc/power.on {existing}')
 
-    - name: 7. Inyectar guestinfo.userdata y guestinfo.metadata con govc (desde el backend)
-      ansible.builtin.shell: |
-        govc vm.change -vm "{{ vm_name }}" \
-          -e guestinfo.userdata="{{ userdata_b64 }}" \
-          -e guestinfo.userdata.encoding=base64 \
-          -e guestinfo.metadata="{{ metadata_b64 }}" \
-          -e guestinfo.metadata.encoding=base64
-      environment:
-        GOVC_URL: "https://{{ esxi_host }}"
-        GOVC_USERNAME: "{{ esxi_user }}"
-        GOVC_PASSWORD: "{{ esxi_pass }}"
-        GOVC_INSECURE: "1"
+        client.close()
+        print("VM encendida con ISO de seed montada.")
+        PYEOF
       delegate_to: localhost
-
-    - name: 8. Encender la VM
-      ansible.builtin.shell: |
-        vim-cmd vmsvc/power.on {{ vmid_result.stdout }}
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
