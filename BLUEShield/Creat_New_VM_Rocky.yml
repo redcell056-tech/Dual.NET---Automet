@@ -7,7 +7,7 @@
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
     esxipass: "!Urielito2001"
-    vm_name: "rocky-server-auto"  # Nombre nuevo para evitar conflictos
+    vm_name: "rocky-gui-09"  # Nombre nuevo para evitar conflictos
     datastore: "datastore1"
     # Asegúrate de que este sea el nombre exacto de tu ISO de Rocky
     iso_rel_path: "ISOS/Rocky-9.6-x86_64-minimal.iso"
@@ -49,21 +49,27 @@
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 3
 
+        # AQUÍ ESTÁ LA CORRECCIÓN: Usamos la ruta completa con el datastore
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # Limpieza (quitamos todo lo que Ansible escribe mal)
+        # Limpieza profunda: quitamos CUALQUIER rastro del CD-ROM anterior
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^firmware/d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
         sed -i '/^bios.bootDeviceClasses/d' "$VMX"
+        # Por si acaso, borramos también la línea 'filename' en minúscula que a veces deja Ansible
+        sed -i '/filename.*Rocky/d' "$VMX"
 
-        # Escritura de la receta exacta de Zabbix
+        # Escritura de la receta exacta de Zabbix (ruta completa)
         cat >> "$VMX" << 'EOF'
         ide0:0.present = "TRUE"
         ide0:0.deviceType = "cdrom-image"
         ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
         EOF
+
+        echo "=== Configuración final en el .vmx ==="
+        grep -E "ide0:0" "$VMX"
 
         # Recargamos y encendemos
         vim-cmd vmsvc/reload $VMID
