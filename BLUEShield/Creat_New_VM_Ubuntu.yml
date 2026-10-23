@@ -1,5 +1,5 @@
 ---
-- name: Crear VM (Prueba con Ubuntu) en ESXi via SSH
+- name: Crear VM Ubuntu Server en ESXi via SSH (ESXi 8)
   hosts: localhost
   connection: local
   gather_facts: no
@@ -7,26 +7,28 @@
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
     esxipass: "!Urielito2001"
-    vm_name: "rocky-gui-01"
+    vm_name: "ubuntu-gui-05"  # Nombre nuevo para evitar conflictos
     datastore: "datastore1"
-    # ⚠️ Usando el nombre exacto que me mostraste
+    # Ruta relativa al datastore (confirmada en tu ls -la)
     iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
 
   tasks:
-    # 1. Crear la VM
+    # ---------------------------------------------------------
+    # 1. Crear la VM con los mínimos requisitos
+    # ---------------------------------------------------------
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
         esxiusername: "{{ esxiuser }}"
         esxipassword: "{{ esxipass }}"
         name: "{{ vm_name }}"
-        guest_id: "ubuntu64Guest"  # Cambiado a Ubuntu
+        guest_id: "ubuntu64Guest"  # ID correcto para Ubuntu
         datastore: "{{ datastore }}"
         hardware:
-          memory_mb: 2048
-          num_cpus: 2
+          memory_mb: 2048          # 2 GB RAM
+          num_cpus: 2              # 2 vCPUs
         disk:
-          - size_gb: 20
+          - size_gb: 20            # 20 GB de disco
             type: thin
         networks:
           - name: "VM Network"
@@ -41,12 +43,15 @@
 
     - name: Mostrar resultado de creación
       debug:
-        msg: "VM creada correctamente."
+        msg: "VM Ubuntu creada correctamente."
 
-    # 2. Corregir el .vmx a fondo vía SSH y encender la VM
+    # ---------------------------------------------------------
+    # 2. Corregir el .vmx vía SSH para forzar el arranque del ISO
+    # ---------------------------------------------------------
     - name: Corregir CD-ROM y orden de arranque en el ESXi
       shell: |
         set -e
+        # 1. Buscar el VMID
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
         if [ -z "$VMID" ]; then
           echo "ERROR: No se encontró la VM {{ vm_name }}"
@@ -54,19 +59,20 @@
         fi
         echo "VMID detectado: $VMID"
 
+        # 2. Apagar la VM si está encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # Limpieza profunda (borra TODO lo que tenga que ver con CD-ROM y arranque)
+        # 3. Limpieza profunda de configuraciones previas de CD-ROM y arranque
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
         sed -i '/^bios.bootDeviceClasses/d' "$VMX"
         sed -i '/^firmware/d' "$VMX"
 
-        # Insertar configuración correcta (Forzando BIOS y ruta con corchetes)
+        # 4. Insertar configuración correcta (Forzando BIOS y ruta con corchetes)
         cat >> "$VMX" << 'EOF'
         firmware = "bios"
         ide0:0.present = "TRUE"
@@ -80,6 +86,7 @@
         echo "=== Configuración aplicada ==="
         grep -E "firmware|ide0:0|bios.boot" "$VMX"
 
+        # 5. Recargar la configuración y encender la VM
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
