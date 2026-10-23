@@ -95,16 +95,23 @@
         ansible_user: "{{ esxi_user }}"
         ansible_password: "{{ esxi_pass }}"
 
-    - name: 5. Registrar la VM (solo si no está registrada)
+    - name: 5. Verificar si la VM ya está registrada (por nombre)
       ansible.builtin.shell: |
-        if vim-cmd vmsvc/getallvms | grep -q "{{ vmx_path }}"; then
-          echo "VM ya registrada, saltando"
-        else
-          vim-cmd solo/registervm "{{ vmx_path }}"
-        fi
+        vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}'
       delegate_to: "{{ esxi_host }}"
-      register: register_result
-      changed_when: "'VM ya registrada' not in register_result.stdout"
+      register: existing_vmid
+      changed_when: false
+      failed_when: false
+      vars:
+        ansible_connection: ssh
+        ansible_user: "{{ esxi_user }}"
+        ansible_password: "{{ esxi_pass }}"
+
+    - name: 5b. Registrar la VM solo si no existe
+      ansible.builtin.shell: |
+        vim-cmd solo/registervm "{{ vmx_path }}"
+      delegate_to: "{{ esxi_host }}"
+      when: existing_vmid.stdout == ""
       vars:
         ansible_connection: ssh
         ansible_user: "{{ esxi_user }}"
@@ -112,7 +119,7 @@
 
     - name: 6. Obtener vmid de la VM
       ansible.builtin.shell: |
-        vim-cmd vmsvc/getallvms | grep "{{ vm_name }}" | awk '{print $1}'
+        vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}'
       delegate_to: "{{ esxi_host }}"
       register: vmid_result
       vars:
