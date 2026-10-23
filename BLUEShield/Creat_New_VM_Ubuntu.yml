@@ -48,7 +48,7 @@
             datastore: "{{ datastore }}"
         networks:
           - name: "{{ vm_net }}"
-            type: vmxnet3
+            device_type: vmxnet3
         cdrom:
           - type: iso
             iso_path: "{{ iso_path }}"
