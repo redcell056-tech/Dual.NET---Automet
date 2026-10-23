@@ -12,7 +12,6 @@
     vm_mem_mb: 1024
     vm_cpus: 1
     vm_net: "VM Network"
-    # Contenido del userdata para autoinstall (debe estar en formato #cloud-config)
     userdata_content: |
       #cloud-config
       autoinstall:
@@ -20,7 +19,7 @@
         identity:
           hostname: ubuntu-auto
           username: ubuntu
-          password: "$6$rounds=4096$saltsalt$hash..." # Reemplazar con contraseña cifrada real
+          password: "$6$rounds=4096$saltsalt$hash..."
         ssh:
           install-server: true
 
@@ -37,7 +36,7 @@
         password: "{{ esxi_pass }}"
         validate_certs: no
         name: "{{ vm_name }}"
-        datacenter: "ha-datacenter" # ESXi independiente normalmente usa este nombre de centro de datos
+        datacenter: "ha-datacenter"
         folder: "/"
         guest_id: "ubuntu64Guest"
         hardware:
@@ -51,9 +50,8 @@
           - name: "{{ vm_net }}"
             type: vmxnet3
         cdrom:
-          type: iso
-          iso_path: "{{ iso_path }}"
-        # Punto clave: inyectar guestinfo a través de advanced_settings
+          - type: iso
+            iso_path: "{{ iso_path }}"
         advanced_settings:
           - key: "guestinfo.userdata"
             value: "{{ userdata_b64 }}"
