@@ -13,7 +13,7 @@
 
   tasks:
     # ---------------------------------------------------------
-    # 1. Crear la VM con el módulo
+    # 1. Crear la VM con el módulo (mínimos requisitos)
     # ---------------------------------------------------------
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
@@ -24,10 +24,10 @@
         guest_id: "centos8_64Guest"
         datastore: "{{ datastore }}"
         hardware:
-          memory_mb: 2048
-          num_cpus: 2
+          memory_mb: 2048      # 2 GB RAM mínimo para entorno gráfico
+          num_cpus: 2          # 2 vCPUs
         disk:
-          - size_gb: 20
+          - size_gb: 20        # 20 GB de disco
             type: thin
         networks:
           - name: "VM Network"
@@ -45,7 +45,7 @@
         msg: "VM creada correctamente."
 
     # ---------------------------------------------------------
-    # 2. Corregir el .vmx vía SSH en el ESXi
+    # 2. Corregir el .vmx vía SSH y encender la VM
     # ---------------------------------------------------------
     - name: Corregir CD-ROM y orden de arranque en el ESXi
       shell: |
@@ -58,32 +58,30 @@
         fi
         echo "VMID detectado: $VMID"
 
-        # 2. Apagar la VM
+        # 2. Apagar la VM si está encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # 3. Limpiar configuración previa del CD-ROM
+        # 3. Limpiar cualquier configuración previa del CD-ROM y boot order
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
 
-        # 4. Insertar el bloque correcto de SATA + BootOrder
+        # 4. Insertar configuración correcta (formato Ubuntu + startConnected + bootOrder)
         cat >> "$VMX" << 'EOF'
-        sata0.present = "TRUE"
-        sata0:0.present = "TRUE"
-        sata0:0.deviceType = "cdrom-image"
-        sata0:0.fileName = "[{{ datastore }}] {{ iso_rel_path }}"
-        sata0:0.startConnected = "TRUE"
-        sata0:0.clientDevice = "FALSE"
+        ide0:0.present = "TRUE"
+        ide0:0.deviceType = "cdrom-image"
+        ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        ide0:0.startConnected = "TRUE"
         bios.bootOrder = "cdrom,hd"
         EOF
 
         echo "=== Configuración aplicada ==="
-        grep -E "sata0|bios.bootOrder" "$VMX"
+        grep -E "ide0:0|bios.bootOrder" "$VMX"
 
-        # 5. Recargar y encender
+        # 5. Recargar la configuración y encender la VM
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
@@ -92,7 +90,7 @@
       args:
         executable: /bin/sh
       delegate_to: "{{ esxiaddr }}"
-      connection: ssh  # <-- CRÍTICO: Fuerza la conexión SSH
+      connection: ssh  # <-- CRÍTICO: Fuerza la conexión SSH al ESXi
       vars:
         ansible_ssh_user: "{{ esxiuser }}"
         ansible_ssh_pass: "{{ esxipass }}"
