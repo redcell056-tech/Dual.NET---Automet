@@ -40,7 +40,7 @@
 
     - name: 3. Crear VM ficticia (genera esqueleto vmx)
       ansible.builtin.shell: |
-        vim-cmd vmsvc/createdummyvm "{{ vm_name }}" "{{ datastore }}"
+        vim-cmd vmsvc/createdummyvm "{{ vm_name }}" "/vmfs/volumes/{{ datastore }}"
       delegate_to: "{{ esxi_host }}"
       vars:
         ansible_connection: ssh
