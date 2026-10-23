@@ -12,6 +12,7 @@
     iso_rel_path: "ISOS/Rocky-9.6-x86_64-minimal.iso"
 
   tasks:
+    # 1. Crear la VM (el módulo hará lo que pueda, el CD-ROM probablemente quede mal)
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
@@ -41,9 +42,11 @@
       debug:
         msg: "VM creada: {{ vm_result }}"
 
+    # 2. Corregir el archivo .vmx vía SSH en el ESXi
     - name: Corregir CD-ROM y orden de arranque en el ESXi
       shell: |
         set -e
+        # Buscar el VMID de la VM
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
         if [ -z "$VMID" ]; then
           echo "ERROR: No se encontró la VM {{ vm_name }}"
@@ -51,28 +54,32 @@
         fi
         echo "VMID detectado: $VMID"
 
+        # Apagar la VM si está encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
+        # Eliminar cualquier configuración previa de CD-ROM (IDE o SATA) y boot order
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
 
+        # Agregar la configuración correcta del CD-ROM (SATA) y el orden de arranque
         cat >> "$VMX" << 'EOF'
         sata0.present = "TRUE"
         sata0:0.present = "TRUE"
         sata0:0.deviceType = "cdrom-image"
-        sata0:0.fileName = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        sata0:0.fileName = "[{{ datastore }}] {{ iso_rel_path }}"
         sata0:0.startConnected = "TRUE"
         sata0:0.clientDevice = "FALSE"
         bios.bootOrder = "cdrom,hd"
         EOF
 
-        echo "=== Configuración aplicada ==="
+        echo "=== Configuración aplicada en el .vmx ==="
         grep -E "sata0|bios.bootOrder" "$VMX"
 
+        # Recargar la configuración y encender la VM
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
