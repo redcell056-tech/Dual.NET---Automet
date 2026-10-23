@@ -1,133 +1,92 @@
 ---
-- name: Crear VM Ubuntu en ESXi vía SSH + Paramiko + ISO de seed (sin API)
+- name: Crear VM Ubuntu con autoinstall via SSH + ISO de seed
   hosts: localhost
+  connection: local
   gather_facts: no
   vars:
-    esxi_host: "{{ ansible_host }}"
-    esxi_user: "{{ ansible_user }}"
-    esxi_pass: "{{ ansible_password }}"
-    vm_name: "Ubuntu-Server-Auto"
+    esxiaddr: "{{ ansible_host }}"
+    esxiuser: "{{ ansible_user }}"
+    esxipass: "{{ ansible_password }}"
+    vm_name: "ubuntu-auto"
     datastore: "datastore1"
-    vm_dir: "/vmfs/volumes/{{ datastore }}/{{ vm_name }}"
-    vmx_path: "{{ vm_dir }}/{{ vm_name }}.vmx"
-    vmdk_path: "{{ vm_dir }}/{{ vm_name }}.vmdk"
-    iso_path: "[datastore1] ISOS/ubuntu-24.04.2-live-server-amd64.iso"
+    iso_path: "datastore1/ISOS/ubuntu-24.04.2-live-server-amd64.iso"
+    seed_iso_datastore: "datastore1/{{ vm_name }}/seed.iso"
     seed_iso_local: "/tmp/seed.iso"
-    seed_iso_remote: "{{ vm_dir }}/seed.iso"
-    vm_mem_mb: 1024
-    vm_cpus: 1
-    vm_net: "VM Network"
-    userdata_content: |
-      #cloud-config
-      autoinstall:
-        version: 1
-        identity:
-          hostname: ubuntu-auto
-          username: ubuntu
-          password: "$6$rounds=4096$saltsalt$hash..."
-        ssh:
-          install-server: true
 
   tasks:
-    - name: 1. Generar ISO de seed (local, en el backend)
+    - name: 1. Generar ISO de seed con user-data
       ansible.builtin.shell: |
         mkdir -p /tmp/seed_build
-        cat > /tmp/seed_build/user-data <<'USERDATAEOF'
-        {{ userdata_content }}
-        USERDATAEOF
-        cat > /tmp/seed_build/meta-data <<'METADATAEOF'
+        cat > /tmp/seed_build/user-data <<'EOF'
+        #cloud-config
+        autoinstall:
+          version: 1
+          identity:
+            hostname: ubuntu-auto
+            username: ubuntu
+            password: "$6$rounds=4096$saltsalt$hash..."
+          ssh:
+            install-server: true
+        EOF
+        cat > /tmp/seed_build/meta-data <<'EOF'
         instance-id: ubuntu-auto-01
         local-hostname: ubuntu-auto
-        METADATAEOF
+        EOF
         genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock /tmp/seed_build/user-data /tmp/seed_build/meta-data
 
-    - name: 2. Crear VM, subir ISO y configurar vmx usando Paramiko (SSH + SFTP)
+    - name: 2. Crear VM con zaki_lknr.esxissh (primer CD: ISO instalación)
+      zaki_lknr.esxissh.esxissh_guest:
+        esxiaddress: "{{ esxiaddr }}"
+        esxiusername: "{{ esxiuser }}"
+        esxipassword: "{{ esxipass }}"
+        name: "{{ vm_name }}"
+        guest_id: "ubuntu64Guest"
+        datastore: "{{ datastore }}"
+        hardware:
+          memory_mb: 1024
+          num_cpus: 1
+        disk:
+          - size_gb: 20
+            type: thin
+        networks:
+          - name: "VM Network"
+            device_type: vmxnet3
+        cdrom:
+          - type: iso
+            iso_path: "{{ iso_path }}"
+        state: present
+
+    - name: 3. Subir ISO de seed al datastore por SFTP (Paramiko)
       ansible.builtin.shell: |
         python3 - << 'PYEOF'
-        import paramiko, os
-
-        host = "{{ esxi_host }}"
-        user = "{{ esxi_user }}"
-        pwd  = "{{ esxi_pass }}"
-        vm_name = "{{ vm_name }}"
-        vm_dir = "{{ vm_dir }}"
-        vmx_path = "{{ vmx_path }}"
-        vmdk_path = "{{ vmdk_path }}"
-        iso_path = "{{ iso_path }}"
-        seed_local = "{{ seed_iso_local }}"
-        seed_remote = "{{ seed_iso_remote }}"
-        mem = "{{ vm_mem_mb }}"
-        cpus = "{{ vm_cpus }}"
-        net = "{{ vm_net }}"
-
+        import paramiko
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(host, username=user, password=pwd)
-
-        def run(cmd):
-            stdin, stdout, stderr = client.exec_command(cmd)
-            out = stdout.read().decode()
-            err = stderr.read().decode()
-            if err:
-                print(f"STDERR: {err}")
-            return out
-
-        # Crear directorio
-        run(f'mkdir -p "{vm_dir}"')
-
-        # Crear disco (si no existe)
-        if not run(f'test -f "{vmdk_path}" && echo exists').strip() == "exists":
-            run(f'vmkfstools -c 20G -a lsilogic -d thin "{vmdk_path}"')
-
-        # Crear esqueleto vmx
-        run(f'vim-cmd vmsvc/createdummyvm "{vm_name}" "/vmfs/volumes/{{ datastore }}"')
-
-        # Subir la ISO de seed por SFTP
+        client.connect("{{ esxiaddr }}", username="{{ esxiuser }}", password="{{ esxipass }}")
         sftp = client.open_sftp()
-        sftp.put(seed_local, seed_remote)
+        sftp.put("{{ seed_iso_local }}", "/vmfs/volumes/{{ datastore }}/{{ vm_name }}/seed.iso")
         sftp.close()
-
-        # Escribir el vmx con dos CD-ROM
-        vmx_content = f'''.encoding = "UTF-8"
-        config.version = "8"
-        virtualHW.version = "20"
-        displayName = "{vm_name}"
-        guestOS = "ubuntu-64"
-        numvcpus = "{cpus}"
-        memSize = "{mem}"
-
-        scsi0.present = "TRUE"
-        scsi0.virtualDev = "lsilogic"
-        scsi0:0.present = "TRUE"
-        scsi0:0.fileName = "{vm_name}.vmdk"
-        scsi0:0.deviceType = "scsi-hardDisk"
-
-        ethernet0.present = "TRUE"
-        ethernet0.virtualDev = "vmxnet3"
-        ethernet0.networkName = "{net}"
-        ethernet0.addressType = "generated"
-
-        sata0.present = "TRUE"
-        sata0:0.present = "TRUE"
-        sata0:0.deviceType = "cdrom-image"
-        sata0:0.fileName = "{iso_path}"
-
-        sata0:1.present = "TRUE"
-        sata0:1.deviceType = "cdrom-image"
-        sata0:1.fileName = "{seed_remote}"
-        '''
-        run(f'cat > "{vmx_path}" <<\'VMXEOF\'\n{vmx_content}\nVMXEOF')
-
-        # Registrar si no está registrada
-        existing = run(f'vim-cmd vmsvc/getallvms | grep -w "{vm_name}" | awk \'{{print $1}}\'').strip()
-        if not existing:
-            run(f'vim-cmd solo/registervm "{vmx_path}"')
-            existing = run(f'vim-cmd vmsvc/getallvms | grep -w "{vm_name}" | awk \'{{print $1}}\'').strip()
-
-        # Encender
-        run(f'vim-cmd vmsvc/power.on {existing}')
-
         client.close()
-        print("VM encendida con ISO de seed montada.")
         PYEOF
-      delegate_to: localhost
+
+    - name: 4. Añadir segundo CD-ROM (seed) al vmx por SSH
+      ansible.builtin.shell: |
+        python3 - << 'PYEOF'
+        import paramiko
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect("{{ esxiaddr }}", username="{{ esxiuser }}", password="{{ esxipass }}")
+        vmx = "/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
+        cmd = f'echo "sata0:1.present = \\"TRUE\\"" >> {vmx}; echo "sata0:1.deviceType = \\"cdrom-image\\"" >> {vmx}; echo "sata0:1.fileName = \\"/vmfs/volumes/{{ datastore }}/{{ vm_name }}/seed.iso\\"" >> {vmx}'
+        stdin, stdout, stderr = client.exec_command(cmd)
+        print(stderr.read().decode())
+        client.close()
+        PYEOF
+
+    - name: 5. Encender la VM
+      zaki_lknr.esxissh.esxissh_guest_power:
+        esxiaddress: "{{ esxiaddr }}"
+        esxiusername: "{{ esxiuser }}"
+        esxipassword: "{{ esxipass }}"
+        name: "{{ vm_name }}"
+        state: poweredon
