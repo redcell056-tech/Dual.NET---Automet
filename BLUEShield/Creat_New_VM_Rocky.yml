@@ -1,5 +1,5 @@
 ---
-- name: Crear VM Rocky Linux (Mínimos) - Configuración Forzada
+- name: Crear VM Rocky Linux (Configuración Forzada Definitiva)
   hosts: localhost
   connection: local
   gather_facts: no
@@ -7,13 +7,13 @@
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
     esxipass: "!Urielito2001"
-    vm_name: "rocky-gui-10"  # Nombre nuevo para no chocar con las anteriores
+    vm_name: "rocky-server-final"  # Nombre nuevo para evitar conflictos
     datastore: "datastore1"
-    # Ruta relativa al datastore, SIN el nombre del datastore al principio
+    # Ruta relativa al datastore (sin "datastore1/" al principio)
     iso_rel_path: "ISOS/Rocky-9.6-x86_64-minimal.iso"
 
   tasks:
-    # 1. Crear la VM
+    # 1. Crear la máquina virtual
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
@@ -39,44 +39,36 @@
       vars:
         ansible_python_interpreter: /usr/local/bin/python
 
-    # 2. Corregir el .vmx a la fuerza (Limpieza total y reescritura)
-    - name: Forzar configuración correcta del .vmx
+    # 2. Corregir el .vmx con precisión quirúrgica y encender
+    - name: Corregir .vmx y encender la VM
       shell: |
         set -e
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
         
-        # Apagar la VM
+        # Apagamos por si el módulo la encendió con la config mala
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 3
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # 1. Limpieza radical: Eliminamos CUALQUIER línea que contenga "ide" o "sata"
-        sed -i '/ide[01]:[0-9]/d' "$VMX"
-        sed -i '/sata[0-9]:[0-9]/d' "$VMX"
-        
-        # 2. Eliminamos configuraciones de arranque previas
-        sed -i '/^firmware/d' "$VMX"
-        sed -i '/^bios.bootOrder/d' "$VMX"
-        sed -i '/^bios.bootDeviceClasses/d' "$VMX"
-        sed -i '/^bios.forceSetupOnce/d' "$VMX"
+        # --- LIMPIEZA EXTREMA ---
+        # Creamos un archivo temporal sin NINGUNA línea que contenga ide, sata, cdrom, firmware o boot
+        grep -v -E "ide[01]:[0-9]|sata[0-9]:[0-9]|cdrom|firmware|bios\.boot" "$VMX" > "${VMX}.tmp"
+        mv "${VMX}.tmp" "$VMX"
 
-        # 3. Escribimos la configuración idéntica a la de Ubuntu-ZABBIX (que sí funciona)
+        # --- ESCRITURA DE LA RECETA EXACTA (Idéntica a Ubuntu-ZABBIX) ---
         cat >> "$VMX" << 'EOF'
         ide0:0.present = "TRUE"
         ide0:0.deviceType = "cdrom-image"
         ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
         EOF
 
-        # 4. Forzamos que la BIOS se detenga al arrancar para que podamos verla
-        echo 'bios.forceSetupOnce = "TRUE"' >> "$VMX"
-
         echo "=== Configuración final en el .vmx ==="
-        grep -E "ide0:0|bios.forceSetupOnce" "$VMX"
+        grep -E "ide0:0" "$VMX"
 
-        # 5. Recargamos la configuración y encendemos
+        # Recargamos la configuración y encendemos
         vim-cmd vmsvc/reload $VMID
-        sleep 2
+        sleep 3
         vim-cmd vmsvc/power.on $VMID
       args:
         executable: /bin/sh
