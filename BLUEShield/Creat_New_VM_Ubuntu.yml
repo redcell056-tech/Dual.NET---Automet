@@ -32,6 +32,8 @@
     - name: 2. Crear disco virtual thin de 20G
       ansible.builtin.shell: |
         vmkfstools -c 20G -a lsilogic -d thin "{{ vmdk_path }}"
+      args:
+        creates: "{{ vmdk_path }}"
       delegate_to: "{{ esxi_host }}"
       vars:
         ansible_connection: ssh
