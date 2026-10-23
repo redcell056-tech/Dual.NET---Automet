@@ -12,7 +12,9 @@
     iso_rel_path: "ISOS/Rocky-9.6-x86_64-minimal.iso"
 
   tasks:
-    # 1. Crear la VM (el módulo hará lo que pueda, el CD-ROM probablemente quede mal)
+    # ---------------------------------------------------------
+    # 1. Crear la VM con el módulo
+    # ---------------------------------------------------------
     - name: Crear la VM en ESXi
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
@@ -40,13 +42,15 @@
 
     - name: Mostrar resultado de creación
       debug:
-        msg: "VM creada: {{ vm_result }}"
+        msg: "VM creada correctamente."
 
-    # 2. Corregir el archivo .vmx vía SSH en el ESXi
+    # ---------------------------------------------------------
+    # 2. Corregir el .vmx vía SSH en el ESXi
+    # ---------------------------------------------------------
     - name: Corregir CD-ROM y orden de arranque en el ESXi
       shell: |
         set -e
-        # Buscar el VMID de la VM
+        # 1. Buscar el VMID
         VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
         if [ -z "$VMID" ]; then
           echo "ERROR: No se encontró la VM {{ vm_name }}"
@@ -54,18 +58,18 @@
         fi
         echo "VMID detectado: $VMID"
 
-        # Apagar la VM si está encendida
+        # 2. Apagar la VM
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # Eliminar cualquier configuración previa de CD-ROM (IDE o SATA) y boot order
+        # 3. Limpiar configuración previa del CD-ROM
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
 
-        # Agregar la configuración correcta del CD-ROM (SATA) y el orden de arranque
+        # 4. Insertar el bloque correcto de SATA + BootOrder
         cat >> "$VMX" << 'EOF'
         sata0.present = "TRUE"
         sata0:0.present = "TRUE"
@@ -76,10 +80,10 @@
         bios.bootOrder = "cdrom,hd"
         EOF
 
-        echo "=== Configuración aplicada en el .vmx ==="
+        echo "=== Configuración aplicada ==="
         grep -E "sata0|bios.bootOrder" "$VMX"
 
-        # Recargar la configuración y encender la VM
+        # 5. Recargar y encender
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
@@ -88,6 +92,7 @@
       args:
         executable: /bin/sh
       delegate_to: "{{ esxiaddr }}"
+      connection: ssh  # <-- CRÍTICO: Fuerza la conexión SSH
       vars:
         ansible_ssh_user: "{{ esxiuser }}"
         ansible_ssh_pass: "{{ esxipass }}"
