@@ -1,8 +1,79 @@
 ---
-- name: Creat VM Alma
-  hosts: host
-  gather_facts: yes
+- name: Crear VM AlmaLinux (Configuración Forzada)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    esxiaddr: "192.168.1.67"
+    esxiuser: "root"
+    esxipass: "!Urielito2001"
+    vm_name: "alma-server-final"  # Nombre nuevo para evitar conflictos
+    datastore: "datastore1"
+    # Usando el nombre exacto que aparece en tu ls -la
+    iso_rel_path: "ISOS/AlmaLinux-9.6-x86_64-minimal (2).iso"
+
   tasks:
-    - name: Tarea de prueba
-      ansible.builtin.debug:
-        msg: "Ejecutando en {{ inventory_hostname }}"
+    # 1. Crear la máquina virtual
+    - name: Crear la VM en ESXi
+      zaki_lknr.esxissh.esxissh_guest:
+        esxiaddress: "{{ esxiaddr }}"
+        esxiusername: "{{ esxiuser }}"
+        esxipassword: "{{ esxipass }}"
+        name: "{{ vm_name }}"
+        guest_id: "rhel9_64Guest"   # AlmaLinux 9 usa el mismo ID que RHEL 9
+        datastore: "{{ datastore }}"
+        hardware:
+          memory_mb: 2048
+          num_cpus: 2
+        disk:
+          - size_gb: 20
+            type: thin
+        networks:
+          - name: "VM Network"
+            device_type: "vmxnet3"
+        cdrom:
+          - type: "iso"
+            iso_path: "{{ iso_rel_path }}"
+        state: present
+      register: vm_result
+      vars:
+        ansible_python_interpreter: /usr/local/bin/python
+
+    # 2. Corregir el .vmx con precisión quirúrgica y encender
+    - name: Corregir .vmx y encender la VM
+      shell: |
+        set -e
+        VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
+        
+        # Apagamos por si el módulo la encendió
+        vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+        sleep 3
+
+        VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
+
+        # --- LIMPIEZA EXTREMA ---
+        grep -v -E "ide[01]:[0-9]|sata[0-9]:[0-9]|cdrom|firmware|bios\.boot" "$VMX" > "${VMX}.tmp"
+        mv "${VMX}.tmp" "$VMX"
+
+        # --- ESCRITURA DE LA RECETA EXACTA (Receta Zabbix) ---
+        cat >> "$VMX" << 'EOF'
+        ide0:0.present = "TRUE"
+        ide0:0.deviceType = "cdrom-image"
+        ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        EOF
+
+        echo "=== Configuración final en el .vmx ==="
+        grep -E "ide0:0" "$VMX"
+
+        # Recargamos la configuración y encendemos
+        vim-cmd vmsvc/reload $VMID
+        sleep 3
+        vim-cmd vmsvc/power.on $VMID
+      args:
+        executable: /bin/sh
+      delegate_to: "{{ esxiaddr }}"
+      connection: ssh
+      vars:
+        ansible_ssh_user: "{{ esxiuser }}"
+        ansible_ssh_pass: "{{ esxipass }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
