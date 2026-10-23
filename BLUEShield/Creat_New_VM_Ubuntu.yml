@@ -95,10 +95,16 @@
         ansible_user: "{{ esxi_user }}"
         ansible_password: "{{ esxi_pass }}"
 
-    - name: 5. Registrar la VM
+    - name: 5. Registrar la VM (solo si no está registrada)
       ansible.builtin.shell: |
-        vim-cmd solo/registervm "{{ vmx_path }}"
+        if vim-cmd vmsvc/getallvms | grep -q "{{ vmx_path }}"; then
+          echo "VM ya registrada, saltando"
+        else
+          vim-cmd solo/registervm "{{ vmx_path }}"
+        fi
       delegate_to: "{{ esxi_host }}"
+      register: register_result
+      changed_when: "'VM ya registrada' not in register_result.stdout"
       vars:
         ansible_connection: ssh
         ansible_user: "{{ esxi_user }}"
