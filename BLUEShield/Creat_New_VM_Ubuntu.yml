@@ -1,5 +1,5 @@
 ---
-- name: Crear VM Ubuntu en ESXi vía SSH (sin API, usando ansible_host)
+- name: Crear VM Ubuntu en ESXi y configurar autoinstall con cloud-init
   hosts: localhost
   gather_facts: no
   vars:
@@ -8,98 +8,61 @@
     esxi_pass: "{{ ansible_password }}"
     vm_name: "Ubuntu-Server-Auto"
     datastore: "datastore1"
-    vm_dir: "/vmfs/volumes/{{ datastore }}/{{ vm_name }}"
-    vmx_path: "{{ vm_dir }}/{{ vm_name }}.vmx"
-    vmdk_path: "{{ vm_dir }}/{{ vm_name }}.vmdk"
     iso_path: "[datastore1] ISOS/ubuntu-24.04.2-live-server-amd64.iso"
     vm_mem_mb: 1024
     vm_cpus: 1
     vm_net: "VM Network"
-    # userdata en base64 para Autoinstall
-    userdata_b64: "{{ lookup('template', 'userdata.yml.j2') | b64encode }}"
+    # Contenido del userdata para autoinstall (debe estar en formato #cloud-config)
+    userdata_content: |
+      #cloud-config
+      autoinstall:
+        version: 1
+        identity:
+          hostname: ubuntu-auto
+          username: ubuntu
+          password: "$6$rounds=4096$saltsalt$hash..." # Reemplazar con contraseña cifrada real
+        ssh:
+          install-server: true
 
   tasks:
-    - name: 1. Crear directorio de la VM
-      ansible.builtin.shell: |
-        mkdir -p "{{ vm_dir }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    - name: Asegurar que el userdata esté codificado en base64
+      ansible.builtin.set_fact:
+        userdata_b64: "{{ userdata_content | b64encode }}"
+        metadata_b64: "{{ {'instance-id': 'ubuntu-auto-01'} | to_json | b64encode }}"
 
-    - name: 2. Crear disco virtual thin de 20G
-      ansible.builtin.shell: |
-        vmkfstools -c 20G -a lsilogic -d thin "{{ vmdk_path }}"
-      args:
-        creates: "{{ vmdk_path }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
-
-    - name: 3. Crear VM ficticia (genera esqueleto vmx)
-      ansible.builtin.shell: |
-        vim-cmd vmsvc/createdummyvm "{{ vm_name }}" "/vmfs/volumes/{{ datastore }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
-
-    - name: 4. Escribir configuración completa del vmx
-      ansible.builtin.shell: |
-        cat > "{{ vmx_path }}" <<'VMXEOF'
-        .encoding = "UTF-8"
-        config.version = "8"
-        virtualHW.version = "20"
-        displayName = "{{ vm_name }}"
-        guestOS = "ubuntu-64"
-        numvcpus = "{{ vm_cpus }}"
-        memSize = "{{ vm_mem_mb }}"
-
-        scsi0.present = "TRUE"
-        scsi0.virtualDev = "lsilogic"
-        scsi0:0.present = "TRUE"
-        scsi0:0.fileName = "{{ vm_name }}.vmdk"
-        scsi0:0.deviceType = "scsi-hardDisk"
-
-        ethernet0.present = "TRUE"
-        ethernet0.virtualDev = "vmxnet3"
-        ethernet0.networkName = "{{ vm_net }}"
-        ethernet0.addressType = "generated"
-
-        sata0.present = "TRUE"
-        sata0:0.present = "TRUE"
-        sata0:0.deviceType = "cdrom-image"
-        sata0:0.fileName = "{{ iso_path }}"
-
-        guestinfo.userdata = "{{ userdata_b64 }}"
-        guestinfo.userdata.encoding = "base64"
-        VMXEOF
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
-
-    - name: 5. Registrar la VM
-      ansible.builtin.shell: |
-        vim-cmd solo/registervm "{{ vmx_path }}"
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
-
-    - name: 6. Encender la VM
-      ansible.builtin.shell: |
-        vmid=$(vim-cmd vmsvc/getallvms | grep "{{ vm_name }}" | awk '{print $1}')
-        vim-cmd vmsvc/power.on $vmid
-      delegate_to: "{{ esxi_host }}"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+    - name: Crear, configurar y encender la VM usando vmware_guest
+      community.vmware.vmware_guest:
+        hostname: "{{ esxi_host }}"
+        username: "{{ esxi_user }}"
+        password: "{{ esxi_pass }}"
+        validate_certs: no
+        name: "{{ vm_name }}"
+        datacenter: "ha-datacenter" # ESXi independiente normalmente usa este nombre de centro de datos
+        folder: "/"
+        guest_id: "ubuntu64Guest"
+        hardware:
+          memory_mb: "{{ vm_mem_mb }}"
+          num_cpus: "{{ vm_cpus }}"
+        disk:
+          - size_gb: 20
+            type: thin
+            datastore: "{{ datastore }}"
+        networks:
+          - name: "{{ vm_net }}"
+            type: vmxnet3
+        cdrom:
+          type: iso
+          iso_path: "{{ iso_path }}"
+        # Punto clave: inyectar guestinfo a través de advanced_settings
+        advanced_settings:
+          - key: "guestinfo.userdata"
+            value: "{{ userdata_b64 }}"
+          - key: "guestinfo.userdata.encoding"
+            value: "base64"
+          - key: "guestinfo.metadata"
+            value: "{{ metadata_b64 }}"
+          - key: "guestinfo.metadata.encoding"
+            value: "base64"
+        state: poweredon
+        wait_for_ip_address: no
+      delegate_to: localhost
