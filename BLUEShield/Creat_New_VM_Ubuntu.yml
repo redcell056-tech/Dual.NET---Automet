@@ -127,23 +127,19 @@
         ansible_user: "{{ esxi_user }}"
         ansible_password: "{{ esxi_pass }}"
 
-    - name: 7. Inyectar guestinfo.userdata y guestinfo.metadata con govc
+    - name: 7. Inyectar guestinfo.userdata y guestinfo.metadata con govc (desde el backend)
       ansible.builtin.shell: |
         govc vm.change -vm "{{ vm_name }}" \
           -e guestinfo.userdata="{{ userdata_b64 }}" \
           -e guestinfo.userdata.encoding=base64 \
           -e guestinfo.metadata="{{ metadata_b64 }}" \
           -e guestinfo.metadata.encoding=base64
-      delegate_to: "{{ esxi_host }}"
       environment:
         GOVC_URL: "https://{{ esxi_host }}"
         GOVC_USERNAME: "{{ esxi_user }}"
         GOVC_PASSWORD: "{{ esxi_pass }}"
         GOVC_INSECURE: "1"
-      vars:
-        ansible_connection: ssh
-        ansible_user: "{{ esxi_user }}"
-        ansible_password: "{{ esxi_pass }}"
+      delegate_to: localhost
 
     - name: 8. Encender la VM
       ansible.builtin.shell: |
