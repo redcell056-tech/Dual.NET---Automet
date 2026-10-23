@@ -1,8 +1,130 @@
 ---
-- name: Install Zabbix
-  hosts: zabbix
-  gather_facts: yes
+- name: Instalar Zabbix Server 7.0 en Ubuntu
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    zabbix_version: "7.0"
+    zabbix_db_name: "zabbix"
+    zabbix_db_user: "zabbix"
+    zabbix_db_password: "!Urielito2001"
+
   tasks:
-    - name: Tarea de prueba
-      ansible.builtin.debug:
-        msg: "Ejecutando en {{ inventory_hostname }}"
+    - name: 1. Actualizar cache APT
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 600
+
+    - name: 2. Instalar dependencias base
+      ansible.builtin.apt:
+        name:
+          - curl
+          - gnupg
+          - ca-certificates
+          - mysql-server
+          - python3-pymysql
+        state: present
+
+    - name: 3. Asegurar MySQL iniciado
+      ansible.builtin.systemd:
+        name: mysql
+        state: started
+        enabled: true
+
+    - name: 4. Descargar repositorio Zabbix
+      ansible.builtin.get_url:
+        url: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_version }}+ubuntu24.04_all.deb"
+        dest: "/tmp/zabbix-release.deb"
+        mode: '0644'
+
+    - name: 5. Instalar repositorio Zabbix
+      ansible.builtin.apt:
+        deb: "/tmp/zabbix-release.deb"
+
+    - name: 6. Actualizar cache APT (con repo Zabbix)
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: 7. Crear base de datos Zabbix
+      community.mysql.mysql_db:
+        name: "{{ zabbix_db_name }}"
+        encoding: utf8mb4
+        collation: utf8mb4_bin
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: 8. Crear usuario de Zabbix
+      community.mysql.mysql_user:
+        name: "{{ zabbix_db_user }}"
+        password: "{{ zabbix_db_password }}"
+        priv: "{{ zabbix_db_name }}.*:ALL"
+        host: localhost
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: 9. Habilitar log_bin_trust_function_creators
+      community.mysql.mysql_query:
+        query: "SET GLOBAL log_bin_trust_function_creators = 1;"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      changed_when: false
+
+    - name: 10. Instalar paquetes Zabbix
+      ansible.builtin.apt:
+        name:
+          - zabbix-server-mysql
+          - zabbix-frontend-php
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+
+    - name: 11. Verificar si el esquema ya fue importado
+      community.mysql.mysql_query:
+        query: "SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_schema = '{{ zabbix_db_name }}' AND table_name = 'users';"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      register: schema_check
+
+    - name: 12. Importar esquema de Zabbix
+      ansible.builtin.shell: |
+        zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | \
+        mysql --default-character-set=utf8mb4 -u{{ zabbix_db_user }} -p'{{ zabbix_db_password }}' {{ zabbix_db_name }}
+      when: schema_check.query_result[0][0].cnt == 0
+
+    - name: 13. Configurar DBPassword
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: '^# DBPassword='
+        line: "DBPassword={{ zabbix_db_password }}"
+      notify: Reiniciar Zabbix Server
+
+    - name: 14. Configurar Zabbix Agent
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+      loop:
+        - { key: 'Server', value: '127.0.0.1' }
+        - { key: 'ServerActive', value: '127.0.0.1' }
+        - { key: 'Hostname', value: '{{ inventory_hostname }}' }
+      notify: Reiniciar Zabbix Agent
+
+    - name: 15. Iniciar servicios
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - zabbix-server
+        - zabbix-agent
+        - apache2
+
+  handlers:
+    - name: Reiniciar Zabbix Server
+      ansible.builtin.systemd:
+        name: zabbix-server
+        state: restarted
+    - name: Reiniciar Zabbix Agent
+      ansible.builtin.systemd:
+        name: zabbix-agent
+        state: restarted
