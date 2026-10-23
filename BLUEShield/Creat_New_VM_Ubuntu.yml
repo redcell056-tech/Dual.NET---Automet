@@ -52,6 +52,9 @@
         cdrom:
           - type: iso
             iso_path: "{{ iso_path }}"
+            controller_number: 0
+            unit_number: 0
+            state: present
         advanced_settings:
           - key: "guestinfo.userdata"
             value: "{{ userdata_b64 }}"
