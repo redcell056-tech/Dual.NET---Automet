@@ -1,0 +1,8 @@
+---
+- name: Creat New VM Rocky
+  hosts: linux
+  gather_facts: yes
+  tasks:
+    - name: Tarea de prueba
+      ansible.builtin.debug:
+        msg: "Ejecutando en {{ inventory_hostname }}"
