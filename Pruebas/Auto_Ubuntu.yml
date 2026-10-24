@@ -13,8 +13,12 @@
     seed_dir: "/tmp/ubuntu-seed-{{ vm_name }}"
     seed_iso_local: "/tmp/{{ vm_name }}-seed.iso"
     seed_iso_datastore: "seed-{{ vm_name }}.iso"
-    ubuntu_user: "ubuntu"
-    ubuntu_pass_hash: "$6$XIs83lUsnsMm3npb$Henfcdf7BRLB4KvAblS19SXzH3OiVdjWzDgj7nNlL3kuIHUmq02cF7S1LDsy7Z.7ne67thovAd8sV6zzNO8W.."
+    
+    # --- NUEVO USUARIO Y CONTRASEÑA ---
+    ubuntu_user: "redcell"
+    # Hash generado con: openssl passwd -6 '!Urielito2001'
+    ubuntu_pass_hash: "$6$TSdKIBtDj1eTkodP$fEiWUkgXCdoN4BQukMLd4Hh8vH1Scuz73wn9D7NZkx.xbOX.ZNIcQ/jYSjNWD.CRknG5e3GLZfCkC2caL3peL0"
+    
     ansible_ssh_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
 
   tasks:
@@ -161,9 +165,6 @@
 
         echo 'bios.bootOrder = "cdrom,hdd"' >> "$VMX"
 
-        echo "=== .vmx CD-ROMs ==="
-        grep -E "ide0:|bios.bootOrder" "$VMX"
-
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
@@ -214,7 +215,8 @@
         name: "{{ vm_ip }}"
         groups: ubuntu_vm
         ansible_user: "{{ ubuntu_user }}"
-        ansible_password: "Urielito2001"
+        # Aquí va la contraseña real en texto plano para que Ansible se conecte
+        ansible_password: "!Urielito2001"
         ansible_ssh_common_args: "{{ ansible_ssh_args }}"
         ansible_python_interpreter: /usr/bin/python3
 
@@ -226,11 +228,34 @@
         timeout: 600
         state: started
 
-- name: Configurar Zabbix en la VM recién instalada
+# =========================================================
+# CONFIGURACIÓN POST-INSTALACIÓN (Zabbix y Sudo)
+# =========================================================
+- name: Configurar Zabbix y dar permisos SUDO a redcell
   hosts: ubuntu_vm
   become: yes
   gather_facts: yes
   tasks:
+    # Es normal que justo después de instalar, apt esté bloqueado. Esto espera a que se libere.
+    - name: Esperar a que el gestor de paquetes se libere
+      shell: while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done;
+      changed_when: false
+
+    - name: Asegurar que redcell esté en el grupo sudo (Administrador)
+      user:
+        name: "{{ ubuntu_user }}"
+        groups: sudo
+        append: yes
+        shell: /bin/bash
+
+    # Opcional: Evita que pida contraseña al usar sudo
+    - name: Permitir a redcell usar sudo sin contraseña (NOPASSWD)
+      copy:
+        dest: "/etc/sudoers.d/90-redcell-nopasswd"
+        content: "{{ ubuntu_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
     - name: Actualizar cache de apt
       apt:
         update_cache: yes
@@ -254,4 +279,4 @@
 
     - name: Mostrar resultado final
       debug:
-        msg: "VM {{ inventory_hostname }} lista. IP: {{ ip_check.stdout }}"
+        msg: "VM {{ inventory_hostname }} lista. Usuario: {{ ubuntu_user }}. IP: {{ ip_check.stdout }}"
