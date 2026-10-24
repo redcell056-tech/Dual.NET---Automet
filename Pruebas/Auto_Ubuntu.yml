@@ -6,7 +6,7 @@
   vars:
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
-    esxipass: "!Urielito2001"
+    esxipass: '!Urielito2001'
     vm_name: "ubuntu-gui-final"
     datastore: "datastore1"
     iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
@@ -18,7 +18,6 @@
     ansible_ssh_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
 
   tasks:
-    # ============ PRE-CHECKS ============
     - name: Verificar que genisoimage existe en localhost
       command: which genisoimage
       register: chk_geniso
@@ -31,7 +30,6 @@
       changed_when: false
       failed_when: chk_sshpass.rc != 0
 
-    # ============ 0. PREPARAR SEED ============
     - name: Crear directorio para seed
       file:
         path: "{{ seed_dir }}"
@@ -79,7 +77,6 @@
       args:
         creates: "{{ seed_iso_local }}"
 
-    # ============ 1. SUBIR SEED AL DATASTORE ============
     - name: Subir seed ISO al datastore de ESXi
       shell: |
         sshpass -p '{{ esxipass }}' scp \
@@ -88,7 +85,6 @@
       args:
         executable: /bin/bash
 
-    # ============ 2. CREAR LA VM ============
     - name: Crear la VM en ESXi (con ISO de Ubuntu montada)
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
@@ -112,7 +108,6 @@
         state: present
       register: vm_result
 
-    # ============ 3. CONFIGURAR .VMX (CD-ROM + SEED + BOOT ORDER) ============
     - name: Configurar CD-ROMs y boot order en el .vmx
       shell: |
         set -e
@@ -121,36 +116,32 @@
           echo "ERROR: no se encontró VMID para {{ vm_name }}"
           exit 1
         fi
-        echo "VMID={{ vm_name }} = $VMID"
+        echo "VMID {{ vm_name }} = $VMID"
 
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
 
-        # Limpiar CD-ROMs previos
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
         sed -i '/^bios.bootOrder/d' "$VMX"
 
-        # CD1: ISO Ubuntu
         cat >> "$VMX" << EOF
         ide0:0.present = "TRUE"
         ide0:0.deviceType = "cdrom-image"
         ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
         EOF
 
-        # CD2: seed ISO (cidata) con user-data
         cat >> "$VMX" << EOF
         ide0:1.present = "TRUE"
         ide0:1.deviceType = "cdrom-image"
         ide0:1.filename = "/vmfs/volumes/{{ datastore }}/{{ seed_iso_datastore }}"
         EOF
 
-        # Boot desde CD
         echo 'bios.bootOrder = "cdrom,hdd"' >> "$VMX"
 
-        echo "=== Contenido final del .vmx (CD-ROMs) ==="
+        echo "=== .vmx CD-ROMs ==="
         grep -E "ide0:|bios.bootOrder" "$VMX"
 
         vim-cmd vmsvc/reload $VMID
@@ -165,7 +156,6 @@
         ansible_ssh_pass: "{{ esxipass }}"
         ansible_ssh_common_args: "{{ ansible_ssh_args }}"
 
-    # ============ 4. ESPERAR IP (autoinstall tarda 8-15 min) ============
     - name: Esperar a que la VM termine autoinstall y obtenga IP
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
@@ -177,7 +167,7 @@
             echo "IP=$IP STATE=$STATE"
             exit 0
           fi
-          echo "[$i/120] esperando... STATE=$STATE IP=${IP:-none}"
+          echo "[$i/120] STATE=$STATE IP=${IP:-none}"
           sleep 10
         done
         echo "TIMEOUT esperando IP"
@@ -199,7 +189,6 @@
       debug:
         msg: "VM {{ vm_name }} lista con IP {{ vm_ip }}"
 
-    # ============ 5. AÑADIR AL INVENTARIO ============
     - name: Añadir VM al inventario dinámico
       add_host:
         name: "{{ vm_ip }}"
@@ -209,7 +198,6 @@
         ansible_ssh_common_args: "{{ ansible_ssh_args }}"
         ansible_python_interpreter: /usr/bin/python3
 
-    # ============ 6. ESPERAR SSH ============
     - name: Esperar a que SSH esté disponible en la VM
       wait_for:
         host: "{{ vm_ip }}"
@@ -218,7 +206,6 @@
         timeout: 600
         state: started
 
-# ============================================================
 - name: Configurar Zabbix en la VM recién instalada
   hosts: ubuntu_vm
   become: yes
