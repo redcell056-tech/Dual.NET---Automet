@@ -84,13 +84,15 @@
         mode: "0644"
         content: ""
 
+    - name: Eliminar seed ISO anterior si existe (para forzar regeneración)
+      file:
+        path: "{{ seed_iso_local }}"
+        state: absent
+
     - name: Generar seed ISO localmente
       command: >
         genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock
         {{ seed_dir }}/user-data {{ seed_dir }}/meta-data
-      args:
-        # force: yes asegura que se regenere aunque el archivo exista
-        force: yes
 
     - name: Subir seed ISO al datastore de ESXi
       shell: |
