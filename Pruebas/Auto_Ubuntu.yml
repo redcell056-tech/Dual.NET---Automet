@@ -1,8 +1,174 @@
 ---
-- name: Auto-Ubuntu
-  hosts: host
+- name: Crear VM Ubuntu con autoinstall + Zabbix (todo en uno)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    esxiaddr: "192.168.1.67"
+    esxiuser: "root"
+    esxipass: "!Urielito2001"
+    vm_name: "ubuntu-gui-final"
+    datastore: "datastore1"
+    iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
+    seed_dir: "/tmp/ubuntu-seed-{{ vm_name }}"
+    seed_iso_local: "/tmp/{{ vm_name }}-seed.iso"
+    seed_iso_datastore: "seed-{{ vm_name }}.iso"
+
+  tasks:
+    # 0. Preparar archivos de cloud-init localmente
+    - name: Crear directorio para seed
+      file:
+        path: "{{ seed_dir }}"
+        state: directory
+
+    - name: Escribir user-data (autoinstall + DHCP + open-vm-tools)
+      copy:
+        dest: "{{ seed_dir }}/user-data"
+        content: |
+          #cloud-config
+          autoinstall:
+            version: 1
+            identity:
+              hostname: {{ vm_name }}
+              username: ubuntu
+              password: "$6$rounds=4096$saltsalt$hashgenerado"  # genera con openssl passwd -6
+            ssh:
+              install-server: true
+              allow-pw: true
+            network:
+              version: 2
+              ethernets:
+                ens192:
+                  dhcp4: true
+            storage:
+              layout:
+                name: direct
+            late-commands:
+              - curtin in-target --target=/target -- apt-get update
+              - curtin in-target --target=/target -- apt-get install -y open-vm-tools
+
+    - name: Escribir meta-data (vacío)
+      copy:
+        dest: "{{ seed_dir }}/meta-data"
+        content: ""
+
+    # 1. Generar la seed ISO localmente (requiere genisoimage/mkisofs en localhost)
+    - name: Generar seed ISO
+      shell: |
+        genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock \
+          {{ seed_dir }}/user-data {{ seed_dir }}/meta-data
+      args:
+        creates: "{{ seed_iso_local }}"
+
+    # 2. Subir la seed ISO al datastore de ESXi por SCP
+    - name: Subir seed ISO al datastore
+      shell: |
+        sshpass -p '{{ esxipass }}' scp -o StrictHostKeyChecking=no \
+          {{ seed_iso_local }} {{ esxiuser }}@{{ esxiaddr }}:/vmfs/volumes/{{ datastore }}/{{ seed_iso_datastore }}
+      args:
+        executable: /bin/bash
+
+    # 3. Crear la VM (sin encender aún, o encender y luego apagar para modificar vmx)
+    - name: Crear la VM en ESXi (sin ISO de seed todavía)
+      zaki_lknr.esxissh.esxissh_guest:
+        esxiaddress: "{{ esxiaddr }}"
+        esxiusername: "{{ esxiuser }}"
+        esxipassword: "{{ esxipass }}"
+        name: "{{ vm_name }}"
+        guest_id: "ubuntu64Guest"
+        datastore: "{{ datastore }}"
+        hardware:
+          memory_mb: 2048
+          num_cpus: 2
+        disk:
+          - size_gb: 20
+            type: thin
+        networks:
+          - name: "VM Network"
+            device_type: "vmxnet3"
+        cdrom:
+          - type: "iso"
+            iso_path: "{{ iso_rel_path }}"
+        state: present
+
+    # 4. Modificar .vmx: agregar segundo CD-ROM (seed) + ajustar boot order
+    - name: Configurar seed CD-ROM y arranque en el .vmx
+      shell: |
+        set -e
+        VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
+        vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+        sleep 2
+
+        VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
+
+        # Limpiar CD-ROMs previos
+        sed -i '/^ide[01]:[0-9]\./d' "$VMX"
+        sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
+
+        # CD1: ISO de Ubuntu
+        cat >> "$VMX" << EOF
+        ide0:0.present = "TRUE"
+        ide0:0.deviceType = "cdrom-image"
+        ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        EOF
+
+        # CD2: seed ISO con user-data (cidata)
+        cat >> "$VMX" << EOF
+        ide0:1.present = "TRUE"
+        ide0:1.deviceType = "cdrom-image"
+        ide0:1.filename = "/vmfs/volumes/{{ datastore }}/{{ seed_iso_datastore }}"
+        EOF
+
+        # Asegurar arranque desde CD
+        echo 'bios.bootOrder = "cdrom,hdd"' >> "$VMX"
+
+        vim-cmd vmsvc/reload $VMID
+        sleep 2
+        vim-cmd vmsvc/power.on $VMID
+      args:
+        executable: /bin/sh
+      delegate_to: "{{ esxiaddr }}"
+      connection: ssh
+      vars:
+        ansible_ssh_user: "{{ esxiuser }}"
+        ansible_ssh_pass: "{{ esxipass }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+    # 5. Esperar a que la VM obtenga IP (requiere open-vm-tools ya instalado por autoinstall)
+    - name: Esperar IP de la VM
+      shell: |
+        for i in $(seq 1 60); do
+          IP=$(vim-cmd vmsvc/get.guest $(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}') | grep -m1 'ipAddress = "' | sed 's/.*ipAddress = "\(.*\)".*/\1/')
+          if [ -n "$IP" ] && [ "$IP" != "0.0.0.0" ]; then
+            echo "$IP"
+            exit 0
+          fi
+          sleep 10
+        done
+        exit 1
+      register: vm_ip
+      delegate_to: "{{ esxiaddr }}"
+      connection: ssh
+      vars:
+        ansible_ssh_user: "{{ esxiuser }}"
+        ansible_ssh_pass: "{{ esxipass }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+    # 6. (Opcional) Conectarse por SSH y configurar Zabbix
+    - name: Agregar VM al inventario dinámico
+      add_host:
+        name: "{{ vm_ip.stdout }}"
+        groups: ubuntu_vm
+        ansible_user: ubuntu
+        ansible_ssh_pass: "tu_password_de_ubuntu"
+
+- name: Configurar Zabbix en la VM
+  hosts: ubuntu_vm
+  become: yes
   gather_facts: yes
   tasks:
-    - name: Tarea de prueba
-      ansible.builtin.debug:
-        msg: "Ejecutando en {{ inventory_hostname }}"
+    - name: Instalar Zabbix agent
+      apt:
+        name: zabbix-agent
+        state: present
+      # ... resto de tu configuración de Zabbix
