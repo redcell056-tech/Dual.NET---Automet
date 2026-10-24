@@ -1,8 +1,8 @@
 ---
-- name: Crear VM Ubuntu con autoinstall + Zabbix (todo en uno)
+- name: Crear VM Ubuntu con autoinstall (DHCP + open-vm-tools) y configurar Zabbix
   hosts: localhost
   connection: local
-  gather_facts: no
+  gather_facts: yes
   vars:
     esxiaddr: "192.168.1.67"
     esxiuser: "root"
@@ -13,33 +13,52 @@
     seed_dir: "/tmp/ubuntu-seed-{{ vm_name }}"
     seed_iso_local: "/tmp/{{ vm_name }}-seed.iso"
     seed_iso_datastore: "seed-{{ vm_name }}.iso"
+    ubuntu_user: "ubuntu"
+    ubuntu_pass_hash: "$6$XIs83lUsnsMm3npb$Henfcdf7BRLB4KvAblS19SXzH3OiVdjWzDgj7nNlL3kuIHUmq02cF7S1LDsy7Z.7ne67thovAd8sV6zzNO8W.."
+    ansible_ssh_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
 
   tasks:
-    # 0. Preparar archivos de cloud-init localmente
+    # ============ PRE-CHECKS ============
+    - name: Verificar que genisoimage existe en localhost
+      command: which genisoimage
+      register: chk_geniso
+      changed_when: false
+      failed_when: chk_geniso.rc != 0
+
+    - name: Verificar que sshpass existe en localhost
+      command: which sshpass
+      register: chk_sshpass
+      changed_when: false
+      failed_when: chk_sshpass.rc != 0
+
+    # ============ 0. PREPARAR SEED ============
     - name: Crear directorio para seed
       file:
         path: "{{ seed_dir }}"
         state: directory
+        mode: "0755"
 
-    - name: Escribir user-data (autoinstall + DHCP + open-vm-tools)
+    - name: Escribir user-data (autoinstall + DHCP + open-vm-tools + SSH)
       copy:
         dest: "{{ seed_dir }}/user-data"
+        mode: "0644"
         content: |
           #cloud-config
           autoinstall:
             version: 1
             identity:
               hostname: {{ vm_name }}
-              username: ubuntu
-              password: "$6$rounds=4096$saltsalt$hashgenerado"  # genera con openssl passwd -6
+              username: {{ ubuntu_user }}
+              password: "{{ ubuntu_pass_hash }}"
             ssh:
               install-server: true
               allow-pw: true
             network:
               version: 2
               ethernets:
-                ens192:
-                  dhcp4: true
+                match:
+                  name: "e*"
+                dhcp4: true
             storage:
               layout:
                 name: direct
@@ -50,26 +69,27 @@
     - name: Escribir meta-data (vacío)
       copy:
         dest: "{{ seed_dir }}/meta-data"
+        mode: "0644"
         content: ""
 
-    # 1. Generar la seed ISO localmente (requiere genisoimage/mkisofs en localhost)
-    - name: Generar seed ISO
-      shell: |
-        genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock \
-          {{ seed_dir }}/user-data {{ seed_dir }}/meta-data
+    - name: Generar seed ISO localmente
+      command: >
+        genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock
+        {{ seed_dir }}/user-data {{ seed_dir }}/meta-data
       args:
         creates: "{{ seed_iso_local }}"
 
-    # 2. Subir la seed ISO al datastore de ESXi por SCP
-    - name: Subir seed ISO al datastore
+    # ============ 1. SUBIR SEED AL DATASTORE ============
+    - name: Subir seed ISO al datastore de ESXi
       shell: |
-        sshpass -p '{{ esxipass }}' scp -o StrictHostKeyChecking=no \
+        sshpass -p '{{ esxipass }}' scp \
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           {{ seed_iso_local }} {{ esxiuser }}@{{ esxiaddr }}:/vmfs/volumes/{{ datastore }}/{{ seed_iso_datastore }}
       args:
         executable: /bin/bash
 
-    # 3. Crear la VM (sin encender aún, o encender y luego apagar para modificar vmx)
-    - name: Crear la VM en ESXi (sin ISO de seed todavía)
+    # ============ 2. CREAR LA VM ============
+    - name: Crear la VM en ESXi (con ISO de Ubuntu montada)
       zaki_lknr.esxissh.esxissh_guest:
         esxiaddress: "{{ esxiaddr }}"
         esxiusername: "{{ esxiuser }}"
@@ -90,12 +110,19 @@
           - type: "iso"
             iso_path: "{{ iso_rel_path }}"
         state: present
+      register: vm_result
 
-    # 4. Modificar .vmx: agregar segundo CD-ROM (seed) + ajustar boot order
-    - name: Configurar seed CD-ROM y arranque en el .vmx
+    # ============ 3. CONFIGURAR .VMX (CD-ROM + SEED + BOOT ORDER) ============
+    - name: Configurar CD-ROMs y boot order en el .vmx
       shell: |
         set -e
-        VMID=$(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}')
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        if [ -z "$VMID" ]; then
+          echo "ERROR: no se encontró VMID para {{ vm_name }}"
+          exit 1
+        fi
+        echo "VMID={{ vm_name }} = $VMID"
+
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 2
 
@@ -104,23 +131,27 @@
         # Limpiar CD-ROMs previos
         sed -i '/^ide[01]:[0-9]\./d' "$VMX"
         sed -i '/^sata[0-9]:[0-9]\./d' "$VMX"
+        sed -i '/^bios.bootOrder/d' "$VMX"
 
-        # CD1: ISO de Ubuntu
+        # CD1: ISO Ubuntu
         cat >> "$VMX" << EOF
         ide0:0.present = "TRUE"
         ide0:0.deviceType = "cdrom-image"
         ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
         EOF
 
-        # CD2: seed ISO con user-data (cidata)
+        # CD2: seed ISO (cidata) con user-data
         cat >> "$VMX" << EOF
         ide0:1.present = "TRUE"
         ide0:1.deviceType = "cdrom-image"
         ide0:1.filename = "/vmfs/volumes/{{ datastore }}/{{ seed_iso_datastore }}"
         EOF
 
-        # Asegurar arranque desde CD
+        # Boot desde CD
         echo 'bios.bootOrder = "cdrom,hdd"' >> "$VMX"
+
+        echo "=== Contenido final del .vmx (CD-ROMs) ==="
+        grep -E "ide0:|bios.bootOrder" "$VMX"
 
         vim-cmd vmsvc/reload $VMID
         sleep 2
@@ -132,43 +163,88 @@
       vars:
         ansible_ssh_user: "{{ esxiuser }}"
         ansible_ssh_pass: "{{ esxipass }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        ansible_ssh_common_args: "{{ ansible_ssh_args }}"
 
-    # 5. Esperar a que la VM obtenga IP (requiere open-vm-tools ya instalado por autoinstall)
-    - name: Esperar IP de la VM
+    # ============ 4. ESPERAR IP (autoinstall tarda 8-15 min) ============
+    - name: Esperar a que la VM termine autoinstall y obtenga IP
       shell: |
-        for i in $(seq 1 60); do
-          IP=$(vim-cmd vmsvc/get.guest $(vim-cmd vmsvc/getallvms | grep -w "{{ vm_name }}" | awk '{print $1}') | grep -m1 'ipAddress = "' | sed 's/.*ipAddress = "\(.*\)".*/\1/')
-          if [ -n "$IP" ] && [ "$IP" != "0.0.0.0" ]; then
-            echo "$IP"
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        for i in $(seq 1 120); do
+          OUT=$(vim-cmd vmsvc/get.guest $VMID 2>/dev/null || true)
+          IP=$(echo "$OUT" | grep -m1 'ipAddress = "' | sed 's/.*ipAddress = "\(.*\)".*/\1/')
+          STATE=$(echo "$OUT" | grep -m1 'guestState = "' | sed 's/.*guestState = "\(.*\)".*/\1/')
+          if [ -n "$IP" ] && [ "$IP" != "0.0.0.0" ] && [ "$IP" != "127.0.0.1" ]; then
+            echo "IP=$IP STATE=$STATE"
             exit 0
           fi
+          echo "[$i/120] esperando... STATE=$STATE IP=${IP:-none}"
           sleep 10
         done
+        echo "TIMEOUT esperando IP"
         exit 1
-      register: vm_ip
+      register: vm_ip_out
       delegate_to: "{{ esxiaddr }}"
       connection: ssh
       vars:
         ansible_ssh_user: "{{ esxiuser }}"
         ansible_ssh_pass: "{{ esxipass }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        ansible_ssh_common_args: "{{ ansible_ssh_args }}"
+      changed_when: false
 
-    # 6. (Opcional) Conectarse por SSH y configurar Zabbix
-    - name: Agregar VM al inventario dinámico
+    - name: Extraer IP
+      set_fact:
+        vm_ip: "{{ vm_ip_out.stdout | regex_search('IP=([0-9.]+)', '\\1') | first }}"
+
+    - name: Mostrar IP obtenida
+      debug:
+        msg: "VM {{ vm_name }} lista con IP {{ vm_ip }}"
+
+    # ============ 5. AÑADIR AL INVENTARIO ============
+    - name: Añadir VM al inventario dinámico
       add_host:
-        name: "{{ vm_ip.stdout }}"
+        name: "{{ vm_ip }}"
         groups: ubuntu_vm
-        ansible_user: ubuntu
-        ansible_ssh_pass: "tu_password_de_ubuntu"
+        ansible_user: "{{ ubuntu_user }}"
+        ansible_password: "Urielito2001"
+        ansible_ssh_common_args: "{{ ansible_ssh_args }}"
+        ansible_python_interpreter: /usr/bin/python3
 
-- name: Configurar Zabbix en la VM
+    # ============ 6. ESPERAR SSH ============
+    - name: Esperar a que SSH esté disponible en la VM
+      wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        delay: 5
+        timeout: 600
+        state: started
+
+# ============================================================
+- name: Configurar Zabbix en la VM recién instalada
   hosts: ubuntu_vm
   become: yes
   gather_facts: yes
   tasks:
-    - name: Instalar Zabbix agent
+    - name: Actualizar cache de apt
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Instalar zabbix-agent
       apt:
         name: zabbix-agent
         state: present
-      # ... resto de tu configuración de Zabbix
+
+    - name: Habilitar y arrancar zabbix-agent
+      systemd:
+        name: zabbix-agent
+        enabled: yes
+        state: started
+
+    - name: Verificar IP de la VM
+      command: hostname -I
+      register: ip_check
+      changed_when: false
+
+    - name: Mostrar resultado final
+      debug:
+        msg: "VM {{ inventory_hostname }} lista. IP: {{ ip_check.stdout }}"
