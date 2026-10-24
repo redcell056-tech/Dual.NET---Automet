@@ -30,7 +30,6 @@
       changed_when: false
       failed_when: chk_sshpass.rc != 0
 
-    # Limpieza previa en ESXi (por si quedó a medias de un intento anterior)
     - name: Destruir VM anterior si existe
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
@@ -56,12 +55,16 @@
         state: directory
         mode: "0755"
 
-    - name: Escribir user-data (autoinstall + DHCP + open-vm-tools + SSH)
+    - name: Escribir user-data (autoinstall + bootcmd + DHCP + open-vm-tools + SSH)
       copy:
         dest: "{{ seed_dir }}/user-data"
         mode: "0644"
         content: |
           #cloud-config
+          bootcmd:
+            - cat /proc/cmdline > /tmp/cmdline
+            - sed -i'' 's/$/ autoinstall/g' /tmp/cmdline
+            - mount -n --bind -o ro /tmp/cmdline /proc/cmdline
           autoinstall:
             version: 1
             identity:
