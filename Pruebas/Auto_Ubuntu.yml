@@ -30,6 +30,26 @@
       changed_when: false
       failed_when: chk_sshpass.rc != 0
 
+    # Limpieza previa en ESXi (por si quedó a medias de un intento anterior)
+    - name: Destruir VM anterior si existe
+      shell: |
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        if [ -n "$VMID" ]; then
+          vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+          sleep 2
+          vim-cmd vmsvc/destroy $VMID || true
+          echo "VM anterior destruida (VMID: $VMID)"
+        else
+          echo "No existía VM previa"
+        fi
+      delegate_to: "{{ esxiaddr }}"
+      connection: ssh
+      vars:
+        ansible_ssh_user: "{{ esxiuser }}"
+        ansible_ssh_pass: "{{ esxipass }}"
+        ansible_ssh_common_args: "{{ ansible_ssh_args }}"
+      changed_when: false
+
     - name: Crear directorio para seed
       file:
         path: "{{ seed_dir }}"
@@ -51,12 +71,6 @@
             ssh:
               install-server: true
               allow-pw: true
-            network:
-              version: 2
-              ethernets:
-                match:
-                  name: "e*"
-                dhcp4: true
             storage:
               layout:
                 name: direct
@@ -75,7 +89,8 @@
         genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock
         {{ seed_dir }}/user-data {{ seed_dir }}/meta-data
       args:
-        creates: "{{ seed_iso_local }}"
+        # force: yes asegura que se regenere aunque el archivo exista
+        force: yes
 
     - name: Subir seed ISO al datastore de ESXi
       shell: |

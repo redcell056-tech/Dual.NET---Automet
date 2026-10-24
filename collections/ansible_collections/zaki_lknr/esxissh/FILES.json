@@ -1,0 +1,75 @@
+{
+ "files": [
+  {
+   "name": ".",
+   "ftype": "dir",
+   "chksum_type": null,
+   "chksum_sha256": null,
+   "format": 1
+  },
+  {
+   "name": ".gitignore",
+   "ftype": "file",
+   "chksum_type": "sha256",
+   "chksum_sha256": "eb9e9535271267264ed98b5ec61f305d2658fb3bb7c19ebeead8564ad7fe1607",
+   "format": 1
+  },
+  {
+   "name": "README.md",
+   "ftype": "file",
+   "chksum_type": "sha256",
+   "chksum_sha256": "70c416162030dda9fc11c4d2c9b0f22ac1515e2651cae2d48722bb0371152155",
+   "format": 1
+  },
+  {
+   "name": "plugins",
+   "ftype": "dir",
+   "chksum_type": null,
+   "chksum_sha256": null,
+   "format": 1
+  },
+  {
+   "name": "plugins/module_utils",
+   "ftype": "dir",
+   "chksum_type": null,
+   "chksum_sha256": null,
+   "format": 1
+  },
+  {
+   "name": "plugins/module_utils/esxissh.py",
+   "ftype": "file",
+   "chksum_type": "sha256",
+   "chksum_sha256": "2e6d5d7c6be75aa1c4874e6f839b1a8fd31a43b024ad7e282cdcf9cfa27fbc19",
+   "format": 1
+  },
+  {
+   "name": "plugins/modules",
+   "ftype": "dir",
+   "chksum_type": null,
+   "chksum_sha256": null,
+   "format": 1
+  },
+  {
+   "name": "plugins/modules/esxissh_guest.py",
+   "ftype": "file",
+   "chksum_type": "sha256",
+   "chksum_sha256": "0acaff6a2ffc1a1a091fe5bac170ce62c5c5179d3b8c95bd9317649d5bc8c180",
+   "format": 1
+  },
+  {
+   "name": "plugins/modules/esxissh_guest_power.py",
+   "ftype": "file",
+   "chksum_type": "sha256",
+   "chksum_sha256": "2f0c3c1932a3338898d48393bccf0c313f7cd6f181219d99d9e806b79b260954",
+   "format": 1
+  },
+  {
+   "name": "plugins/README.md",
+   "ftype": "file",
+   "chksum_type": "sha256",
+   "chksum_sha256": "ce019c2fa0b74e9457b36287058bb0f80bde03324d1499da1a80cd4a9b7ae4e1",
+   "format": 1
+  }
+ ],
+ "format": 1
+}
