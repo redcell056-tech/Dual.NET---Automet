@@ -7,6 +7,13 @@
   vars:
     # --- CONTRASEÑA PARA SUDO (La misma que usas por SSH) ---
     ansible_become_password: "!Urielito2001"
+    
+    # --- CONFIGURACIÓN PARA EVITAR ERRORES DE HUELLA SSH ---
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+    # --- URL DEL SCRIPT OFICIAL DE WAZUH (v4.14) ---
+    wazuh_script_url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
+    wazuh_script_dest: "/tmp/wazuh-install.sh"
 
   tasks:
     # 1. INSTALAR DEPENDENCIAS BÁSICAS
@@ -19,18 +26,20 @@
         state: present
         update_cache: yes
 
-    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN OFICIAL
-    - name: Descargar el script de instalación de Wazuh (v4.14)
+    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN
+    - name: Descargar el script de instalación de Wazuh
       ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
-        dest: "/tmp/wazuh-install.sh"
+        url: "{{ wazuh_script_url }}"
+        dest: "{{ wazuh_script_dest }}"
         mode: '0755'
         force: yes
 
-    # 3. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
+    # 3. EJECUTAR LA INSTALACIÓN DESATENDIDA
+    # -a: All-in-One (Manager + Indexer + Dashboard)
+    # -i: Ignora chequeos de hardware (útil para laboratorios)
     - name: Ejecutar la instalación desatendida de Wazuh
       ansible.builtin.shell: |
-        bash /tmp/wazuh-install.sh -a -i
+        bash {{ wazuh_script_dest }} -a -i
       args:
         executable: /bin/bash
       register: wazuh_install_output
@@ -39,22 +48,23 @@
         - "'Installation finished' not in wazuh_install_output.stdout"
 
     # 4. MOSTRAR LAS CREDENCIALES GENERADAS
-    - name: Mostrar las credenciales de acceso
+    - name: Mostrar las credenciales de acceso (cópialas del log)
       ansible.builtin.debug:
         msg: 
-          - "La instalación ha finalizado. Busca en el log de las líneas:"
+          - "La instalación ha finalizado. Busca en el log las líneas:"
           - "'The password for admin is:'"
           - "'The password for wazuh is:'"
-          - "También puedes extraerlas con: tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
+          - "También puedes extraerlas ejecutando en el servidor:"
+          - "tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
 
-    # 5. VERIFICAR QUE EL SERVICIO ESTÁ ACTIVO
-    - name: Verificar que el servicio wazuh-manager esté activo
+    # 5. ASEGURAR QUE EL SERVICIO ESTÉ ACTIVO
+    - name: Iniciar y habilitar el servicio Wazuh Manager
       ansible.builtin.systemd:
         name: wazuh-manager
         state: started
         enabled: yes
 
-    # 6. MOSTRAR LA URL DEL DASHBOARD
+    # 6. MOSTRAR INFORMACIÓN DE ACCESO
     - name: Mostrar la URL del Dashboard
       ansible.builtin.debug:
         msg:
