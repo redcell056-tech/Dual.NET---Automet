@@ -1,5 +1,5 @@
 ---
-- name: Reinstalar Wazuh Manager (Borrar todo + Instalar de nuevo)
+- name: Reinstalar Wazuh Manager (Limpieza agresiva + Instalación)
   hosts: all
   gather_facts: yes
   become: yes
@@ -8,7 +8,7 @@
     # ==========================================
     # FASE 1: ELIMINAR COMPLETAMENTE WAZUH
     # ==========================================
-    - name: Detener servicios de Wazuh (por si acaso están corriendo)
+    - name: Detener servicios de Wazuh (por si acaso)
       ansible.builtin.systemd:
         name: "{{ item }}"
         state: stopped
@@ -20,20 +20,26 @@
         - wazuh-agent
       ignore_errors: yes
 
-    - name: Descargar el script de instalación/desinstalación de Wazuh
-      ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
-        dest: "/tmp/wazuh-install.sh"
-        mode: '0755'
+    - name: Eliminar scripts de desinstalación rotos (evita errores de dpkg)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dpkg/info/wazuh-manager.prerm
+        - /var/lib/dpkg/info/wazuh-manager.postrm
+        - /var/lib/dpkg/info/wazuh-dashboard.prerm
+        - /var/lib/dpkg/info/wazuh-dashboard.postrm
+        - /var/lib/dpkg/info/wazuh-indexer.prerm
+        - /var/lib/dpkg/info/wazuh-indexer.postrm
+        - /var/lib/dpkg/info/wazuh-agent.prerm
+        - /var/lib/dpkg/info/wazuh-agent.postrm
 
-    - name: Ejecutar la desinstalación oficial de Wazuh
+    - name: Forzar la purga de los paquetes de Wazuh
       ansible.builtin.shell: |
-        bash /tmp/wazuh-install.sh --uninstall
+        dpkg --purge --force-all wazuh-dashboard wazuh-indexer wazuh-manager wazuh-agent filebeat 2>/dev/null || true
       args:
         executable: /bin/bash
-      register: wazuh_uninstall_output
-      failed_when: false  # No fallar si no había nada instalado
-      changed_when: "'Wazuh uninstalled' in wazuh_uninstall_output.stdout"
+      changed_when: false
 
     - name: Eliminar directorios residuales de Wazuh (limpieza profunda)
       ansible.builtin.file:
@@ -42,43 +48,45 @@
       loop:
         - /var/ossec
         - /var/lib/wazuh-indexer
+        - /var/lib/wazuh-dashboard
         - /etc/wazuh-indexer
         - /etc/wazuh-dashboard
+        - /etc/wazuh
         - /usr/share/wazuh-indexer
         - /usr/share/wazuh-dashboard
-        - /etc/wazuh
         - /var/log/wazuh-install.log
         - /tmp/wazuh-install-files.tar
+        - /tmp/wazuh-install.sh
 
-    - name: Limpiar paquetes residuales de Wazuh
-      ansible.builtin.apt:
-        name:
-          - wazuh-manager
-          - wazuh-indexer
-          - wazuh-dashboard
-          - wazuh-agent
-        state: absent
-        purge: yes
-        autoremove: yes
-      ignore_errors: yes
+    - name: Limpiar cgroups residuales y recargar systemd
+      ansible.builtin.shell: |
+        systemctl daemon-reload
+        systemctl reset-failed wazuh-manager.service 2>/dev/null || true
+        systemctl reset-failed wazuh-indexer.service 2>/dev/null || true
+        systemctl reset-failed wazuh-dashboard.service 2>/dev/null || true
+      changed_when: false
 
-    - name: Reparar dpkg (por si la desinstalación dejó algo a medias)
+    - name: Reparar dpkg y limpiar paquetes rotos
       ansible.builtin.shell: |
         dpkg --configure -a
         apt-get -f install -y
+        apt-get autoremove -y
+        apt-get clean
       changed_when: false
+
+    - name: Actualizar el índice de paquetes
+      ansible.builtin.apt:
+        update_cache: yes
 
     # ==========================================
     # FASE 2: INSTALAR WAZUH MANAGER (ALL-IN-ONE)
     # ==========================================
-    - name: Instalar dependencias necesarias (curl, gnupg, apt-transport-https)
-      ansible.builtin.apt:
-        name:
-          - curl
-          - gnupg
-          - apt-transport-https
-        state: present
-        update_cache: yes
+    - name: Descargar el script de instalación de Wazuh
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
+        dest: "/tmp/wazuh-install.sh"
+        mode: '0755'
+        force: yes
 
     - name: Ejecutar la instalación desatendida de Wazuh (All-in-One)
       ansible.builtin.shell: |
@@ -86,17 +94,20 @@
       args:
         executable: /bin/bash
       register: wazuh_install_output
-      failed_when: 
-        - wazuh_install_output.rc != 0
-        - "'Installation finished' not in wazuh_install_output.stdout"
+      failed_when: false  # No fallar aquí, lo comprobamos después
+      changed_when: "'Installation finished' in wazuh_install_output.stdout"
+
+    - name: Verificar si la instalación terminó correctamente
+      ansible.builtin.fail:
+        msg: "La instalación de Wazuh falló. Revisa el log: {{ wazuh_install_output.stdout }}"
+      when: "'Installation finished' not in wazuh_install_output.stdout"
 
     - name: Mostrar las credenciales generadas
       ansible.builtin.debug:
         msg: 
-          - "La instalación ha finalizado. Busca en el log de la tarea anterior las líneas:"
+          - "La instalación ha finalizado. Busca en el log las líneas:"
           - "'The password for admin is:'"
           - "'The password for wazuh is:'"
-          - "Guarda esas contraseñas para acceder al Dashboard."
 
     - name: Verificar que el servicio wazuh-manager esté activo
       ansible.builtin.systemd:
