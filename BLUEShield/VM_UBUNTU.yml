@@ -111,21 +111,23 @@
         vim-cmd vmsvc/power.on $VMID
       args: { executable: /bin/sh }
 
-    - name: Esperar IP de la VM
+    # --- BUCLE DE ESPERA (AUMENTADO A 40 MINUTOS) ---
+    - name: Esperar IP de la VM (máximo 40 minutos)
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
-        for i in $(seq 1 90); do
+        for i in $(seq 1 240); do
           IP=$(vim-cmd vmsvc/get.guest $VMID | grep -m1 'ipAddress = "' | sed 's/.*ipAddress = "\(.*\)".*/\1/')
           if [ -n "$IP" ] && [ "$IP" != "0.0.0.0" ]; then
             echo "¡VM con IP! -> $IP"
             exit 0
           fi
+          echo "Esperando instalación... ($i/240)"
           sleep 10
         done
+        echo "TIMEOUT: La VM no obtuvo IP en 40 minutos."
+        exit 1
 
-    # =========================================================
-    # NUEVA TAREA FINAL: DESCONECTAR CD Y CAMBIAR EL ORDEN DE ARRANQUE
-    # =========================================================
+    # --- TAREA FINAL: QUITAR ISO Y ARRANCAR DEL DISCO DURO ---
     - name: Apagar la VM y desconectar los CD-ROMs para que arranque del disco duro
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
