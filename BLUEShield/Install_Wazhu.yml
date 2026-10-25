@@ -15,16 +15,14 @@
         state: present
         update_cache: yes
 
-    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN OFICIAL
-    - name: Descargar el script de instalación de Wazuh
+    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN (URL ESPECÍFICA QUE SÍ FUNCIONA)
+    - name: Descargar el script de instalación de Wazuh (v4.14)
       ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/4.x/unattended-installation/wazuh-install.sh"
+        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
         dest: "/tmp/wazuh-install.sh"
         mode: '0755'
 
     # 3. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
-    # El flag -a instala Manager + Indexer + Dashboard en el mismo host.
-    # El flag -i ignora el chequeo de hardware (útil si tu lab no llega a 8GB, aunque no es recomendable).
     - name: Ejecutar la instalación desatendida de Wazuh
       ansible.builtin.shell: |
         bash /tmp/wazuh-install.sh -a -i
@@ -36,14 +34,11 @@
         - "'Installation finished' not in wazuh_install_output.stdout"
 
     # 4. MOSTRAR LAS CREDENCIALES GENERADAS
-    # El script genera contraseñas aleatorias para el admin. Las mostramos en el log.
-    - name: Mostrar las credenciales de acceso (cópialas de aquí)
+    - name: Mostrar las credenciales de acceso
       ansible.builtin.debug:
         msg: 
-          - "La instalación ha finalizado. Busca en el log de la tarea anterior las líneas que empiezan con:"
-          - "'The password for admin is:'"
-          - "'The password for wazuh is:'"
-          - "Guarda esas contraseñas para acceder al Dashboard."
+          - "La instalación ha finalizado. Busca en el log las líneas con 'The password for admin is:' y 'The password for wazuh is:'"
+          - "También puedes extraerlas con: tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
 
     # 5. VERIFICAR QUE EL SERVICIO ESTÁ ACTIVO
     - name: Verificar el estado del servicio wazuh-manager
@@ -57,4 +52,4 @@
         msg:
           - "Wazuh Dashboard disponible en: https://{{ ansible_default_ipv4.address }}"
           - "Usuario: admin"
-          - "Contraseña: (revisa el log de la instalación, busca 'The password for admin is...')"
+          - "Contraseña: (extraer del archivo wazuh-passwords.txt)"
