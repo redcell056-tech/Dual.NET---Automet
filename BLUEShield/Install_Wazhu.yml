@@ -1,55 +1,77 @@
 ---
-- name: Instalar Wazuh Manager All-in-One (Desatendido)
+- name: Eliminar completamente Wazuh (Manager, Indexer, Dashboard y Agente)
   hosts: all
   gather_facts: yes
   become: yes
 
   tasks:
-    # 1. INSTALAR DEPENDENCIAS BÁSICAS
-    - name: Instalar curl y dependencias necesarias
+    # 1. DETENER TODOS LOS SERVICIOS DE WAZUH
+    - name: Detener los servicios de Wazuh (manager, indexer, dashboard, agent)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - wazuh-manager
+        - wazuh-indexer
+        - wazuh-dashboard
+        - wazuh-agent
+      ignore_errors: yes
+
+    # 2. DESINSTALAR LOS PAQUETES DE WAZUH
+    - name: Desinstalar paquetes de Wazuh
       ansible.builtin.apt:
         name:
-          - curl
-          - gnupg
-          - apt-transport-https
-        state: present
+          - wazuh-manager
+          - wazuh-indexer
+          - wazuh-dashboard
+          - wazuh-agent
+        state: absent
+        purge: yes
+        autoremove: yes
+
+    # 3. ELIMINAR LOS REPOSITORIOS Y LLAVES DE WAZUH
+    - name: Eliminar repositorio y llave de Wazuh
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/wazuh.list
+        - /usr/share/keyrings/wazuh.gpg
+        - /etc/apt/sources.list.d/wazuh-indexer.list
+        - /etc/apt/sources.list.d/wazuh-dashboard.list
+        - /usr/share/keyrings/wazuh-indexer.gpg
+        - /usr/share/keyrings/wazuh-dashboard.gpg
+
+    # 4. ELIMINAR DIRECTORIOS DE DATOS Y CONFIGURACIÓN
+    - name: Eliminar directorios de datos y configuración de Wazuh
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/ossec
+        - /var/lib/wazuh-indexer
+        - /etc/wazuh-indexer
+        - /etc/wazuh-dashboard
+        - /usr/share/wazuh-indexer
+        - /usr/share/wazuh-dashboard
+        - /etc/wazuh
+        - /var/log/wazuh-install.log
+        - /tmp/wazuh-install.sh
+        - /tmp/wazuh-install-files.tar
+
+    # 5. RECARGAR EL ÍNDICE DE PAQUETES
+    - name: Actualizar el índice de paquetes después de la limpieza
+      ansible.builtin.apt:
         update_cache: yes
 
-    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN (URL ESPECÍFICA QUE SÍ FUNCIONA)
-    - name: Descargar el script de instalación de Wazuh (v4.14)
-      ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
-        dest: "/tmp/wazuh-install.sh"
-        mode: '0755'
-
-    # 3. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
-    - name: Ejecutar la instalación desatendida de Wazuh
+    # 6. VERIFICAR QUE NO QUEDEN SERVICIOS DE WAZUH
+    - name: Verificar que no queden servicios de Wazuh
       ansible.builtin.shell: |
-        bash /tmp/wazuh-install.sh -a -i
-      args:
-        executable: /bin/bash
-      register: wazuh_install_output
-      failed_when: 
-        - wazuh_install_output.rc != 0
-        - "'Installation finished' not in wazuh_install_output.stdout"
+        systemctl list-units --all | grep -i wazuh || true
+      register: wazuh_check
+      changed_when: false
 
-    # 4. MOSTRAR LAS CREDENCIALES GENERADAS
-    - name: Mostrar las credenciales de acceso
+    - name: Mostrar el resultado de la verificación
       ansible.builtin.debug:
-        msg: 
-          - "La instalación ha finalizado. Busca en el log las líneas con 'The password for admin is:' y 'The password for wazuh is:'"
-          - "También puedes extraerlas con: tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
-
-    # 5. VERIFICAR QUE EL SERVICIO ESTÁ ACTIVO
-    - name: Verificar el estado del servicio wazuh-manager
-      ansible.builtin.systemd:
-        name: wazuh-manager
-        state: started
-        enabled: yes
-
-    - name: Mostrar la URL del Dashboard
-      ansible.builtin.debug:
-        msg:
-          - "Wazuh Dashboard disponible en: https://{{ ansible_default_ipv4.address }}"
-          - "Usuario: admin"
-          - "Contraseña: (extraer del archivo wazuh-passwords.txt)"
+        msg: "{{ wazuh_check.stdout_lines if wazuh_check.stdout_lines else '✅ No quedan servicios de Wazuh.' }}"
