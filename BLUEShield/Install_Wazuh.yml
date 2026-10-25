@@ -1,5 +1,5 @@
 ---
-- name: Instalar Wazuh Manager All-in-One (Desatendido)
+- name: Instalar Wazuh Manager All-in-One (Oficial)
   hosts: all
   gather_facts: yes
   become: yes
@@ -16,7 +16,20 @@
     wazuh_script_dest: "/tmp/wazuh-install.sh"
 
   tasks:
-    # 1. INSTALAR DEPENDENCIAS BÁSICAS
+    # 1. ACTUALIZAR EL SISTEMA (Usando la misma contraseña de sudo)
+    - name: Actualizar el índice de paquetes
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Actualizar todos los paquetes del sistema
+      ansible.builtin.apt:
+        upgrade: dist
+        dpkg_options: 'force-confdef,force-confold'
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    # 2. INSTALAR DEPENDENCIAS BÁSICAS
     - name: Instalar dependencias necesarias (curl, gnupg, apt-transport-https)
       ansible.builtin.apt:
         name:
@@ -24,9 +37,8 @@
           - gnupg
           - apt-transport-https
         state: present
-        update_cache: yes
 
-    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN
+    # 3. DESCARGAR EL SCRIPT DE INSTALACIÓN OFICIAL
     - name: Descargar el script de instalación de Wazuh
       ansible.builtin.get_url:
         url: "{{ wazuh_script_url }}"
@@ -34,12 +46,11 @@
         mode: '0755'
         force: yes
 
-    # 3. EJECUTAR LA INSTALACIÓN DESATENDIDA
-    # -a: All-in-One (Manager + Indexer + Dashboard)
-    # -i: Ignora chequeos de hardware (útil para laboratorios)
+    # 4. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
+    # -a: Instala Manager + Indexer + Dashboard en el mismo host.
     - name: Ejecutar la instalación desatendida de Wazuh
       ansible.builtin.shell: |
-        bash {{ wazuh_script_dest }} -a -i
+        bash {{ wazuh_script_dest }} -a
       args:
         executable: /bin/bash
       register: wazuh_install_output
@@ -47,7 +58,7 @@
         - wazuh_install_output.rc != 0
         - "'Installation finished' not in wazuh_install_output.stdout"
 
-    # 4. MOSTRAR LAS CREDENCIALES GENERADAS
+    # 5. MOSTRAR LAS CREDENCIALES GENERADAS
     - name: Mostrar las credenciales de acceso (cópialas del log)
       ansible.builtin.debug:
         msg: 
@@ -57,14 +68,14 @@
           - "También puedes extraerlas ejecutando en el servidor:"
           - "tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
 
-    # 5. ASEGURAR QUE EL SERVICIO ESTÉ ACTIVO
+    # 6. ASEGURAR QUE EL SERVICIO ESTÉ ACTIVO
     - name: Iniciar y habilitar el servicio Wazuh Manager
       ansible.builtin.systemd:
         name: wazuh-manager
         state: started
         enabled: yes
 
-    # 6. MOSTRAR INFORMACIÓN DE ACCESO
+    # 7. MOSTRAR INFORMACIÓN DE ACCESO
     - name: Mostrar la URL del Dashboard
       ansible.builtin.debug:
         msg:
