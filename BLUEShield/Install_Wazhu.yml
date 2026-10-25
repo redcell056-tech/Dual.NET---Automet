@@ -1,19 +1,12 @@
 ---
-- name: Instalar y configurar Wazuh Agent
+- name: Instalar Wazuh Manager All-in-One (Desatendido)
   hosts: all
   gather_facts: yes
   become: yes
 
-  vars:
-    # --- VARIABLE QUE EL USUARIO DEFINE AL EJECUTAR ---
-    # Si el Manager está en el mismo servidor, usa "localhost" o "127.0.0.1"
-    # Si está en otro host, pon su hostname o IP aquí.
-    wazuh_manager: "192.168.1.70"  # <--- CAMBIA ESTO O DÉJALO VACÍO
-    wazuh_agent_name: "{{ inventory_hostname }}"
-
   tasks:
-    # 1. INSTALAR DEPENDENCIAS
-    - name: Instalar dependencias necesarias (curl, gnupg)
+    # 1. INSTALAR DEPENDENCIAS BÁSICAS
+    - name: Instalar curl y dependencias necesarias
       ansible.builtin.apt:
         name:
           - curl
@@ -22,56 +15,46 @@
         state: present
         update_cache: yes
 
-    # 2. AGREGAR LA CLAVE GPG DE WAZUH
-    - name: Agregar la llave GPG de Wazuh
+    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN OFICIAL
+    - name: Descargar el script de instalación de Wazuh
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/4.x/unattended-installation/wazuh-install.sh"
+        dest: "/tmp/wazuh-install.sh"
+        mode: '0755'
+
+    # 3. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
+    # El flag -a instala Manager + Indexer + Dashboard en el mismo host.
+    # El flag -i ignora el chequeo de hardware (útil si tu lab no llega a 8GB, aunque no es recomendable).
+    - name: Ejecutar la instalación desatendida de Wazuh
       ansible.builtin.shell: |
-        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
-        chmod 644 /usr/share/keyrings/wazuh.gpg
+        bash /tmp/wazuh-install.sh -a -i
       args:
-        creates: /usr/share/keyrings/wazuh.gpg
+        executable: /bin/bash
+      register: wazuh_install_output
+      failed_when: 
+        - wazuh_install_output.rc != 0
+        - "'Installation finished' not in wazuh_install_output.stdout"
 
-    # 3. AGREGAR EL REPOSITORIO DE WAZUH
-    - name: Agregar el repositorio de Wazuh
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/wazuh.list
-        content: |
-          deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main
-        mode: '0644'
+    # 4. MOSTRAR LAS CREDENCIALES GENERADAS
+    # El script genera contraseñas aleatorias para el admin. Las mostramos en el log.
+    - name: Mostrar las credenciales de acceso (cópialas de aquí)
+      ansible.builtin.debug:
+        msg: 
+          - "La instalación ha finalizado. Busca en el log de la tarea anterior las líneas que empiezan con:"
+          - "'The password for admin is:'"
+          - "'The password for wazuh is:'"
+          - "Guarda esas contraseñas para acceder al Dashboard."
 
-    # 4. ACTUALIZAR EL ÍNDICE DE PAQUETES
-    - name: Actualizar el índice de paquetes después de agregar el repo
-      ansible.builtin.apt:
-        update_cache: yes
-
-    # 5. INSTALAR EL AGENTE DE WAZUH
-    - name: Instalar el agente de Wazuh
-      ansible.builtin.apt:
-        name: wazuh-agent
-        state: present
-
-    # 6. CONFIGURAR EL AGENTE PARA APUNTAR AL MANAGER
-    - name: Configurar la IP del Wazuh Manager en el agente
-      ansible.builtin.lineinfile:
-        path: /var/ossec/etc/ossec.conf
-        regexp: '<address>.*</address>'
-        line: "    <address>{{ wazuh_manager }}</address>"
-        backup: yes
-
-    # 7. HABILITAR E INICIAR EL SERVICIO
-    - name: Recargar systemd y habilitar el servicio wazuh-agent
+    # 5. VERIFICAR QUE EL SERVICIO ESTÁ ACTIVO
+    - name: Verificar el estado del servicio wazuh-manager
       ansible.builtin.systemd:
-        name: wazuh-agent
+        name: wazuh-manager
         state: started
         enabled: yes
-        daemon_reload: yes
 
-    # 8. VERIFICAR EL ESTADO
-    - name: Verificar que el agente de Wazuh está corriendo
-      ansible.builtin.command: systemctl status wazuh-agent
-      register: wazuh_status
-      changed_when: false
-      failed_when: wazuh_status.rc != 0
-
-    - name: Mostrar el estado del agente de Wazuh
+    - name: Mostrar la URL del Dashboard
       ansible.builtin.debug:
-        msg: "{{ wazuh_status.stdout_lines }}"
+        msg:
+          - "Wazuh Dashboard disponible en: https://{{ ansible_default_ipv4.address }}"
+          - "Usuario: admin"
+          - "Contraseña: (revisa el log de la instalación, busca 'The password for admin is...')"
