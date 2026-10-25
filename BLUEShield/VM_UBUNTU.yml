@@ -111,45 +111,45 @@
         vim-cmd vmsvc/power.on $VMID
       args: { executable: /bin/sh }
 
-    # --- BUCLE DE ESPERA (AUMENTADO A 40 MINUTOS) ---
-    - name: Esperar IP de la VM (máximo 40 minutos)
+    # --- ESPERA A QUE LA INSTALACIÓN TERMINE (MÁXIMO 40 MINUTOS) ---
+    - name: Esperar a que la instalación termine (la VM se apaga o se queda colgada)
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
         for i in $(seq 1 240); do
-          IP=$(vim-cmd vmsvc/get.guest $VMID | grep -m1 'ipAddress = "' | sed 's/.*ipAddress = "\(.*\)".*/\1/')
-          if [ -n "$IP" ] && [ "$IP" != "0.0.0.0" ]; then
-            echo "¡VM con IP! -> $IP"
+          STATE=$(vim-cmd vmsvc/get.guest $VMID | grep -m1 'guestState = "' | sed 's/.*guestState = "\(.*\)".*/\1/')
+          # Si la VM se apaga o se queda en estado 'poweredOff', la instalación terminó
+          if [ "$STATE" == "poweredOff" ] || [ "$STATE" == "powered off" ] || [ -z "$STATE" ]; then
+            echo "Instalación terminada. La VM se apagó sola."
             exit 0
           fi
-          echo "Esperando instalación... ($i/240)"
+          echo "Instalando... ($i/240) Estado: $STATE"
           sleep 10
         done
-        echo "TIMEOUT: La VM no obtuvo IP en 40 minutos."
+        echo "TIMEOUT: La instalación no terminó en 40 minutos."
         exit 1
 
-    # --- TAREA FINAL: QUITAR ISO Y ARRANCAR DEL DISCO DURO ---
-    - name: Apagar la VM y desconectar los CD-ROMs para que arranque del disco duro
+    # --- CONFIGURAR ARRANQUE DESDE DISCO DURO Y ENCENDER DE NUEVO ---
+    - name: Apagar VM (por si acaso), desconectar CDs y arrancar del disco duro
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
         
-        # 1. Apagar la VM
+        # Forzar apagado por si sigue encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 3
         
-        # 2. Editar el archivo .vmx
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
         
-        # Desconectar los dos CD-ROM (poner present = FALSE)
+        # Desconectar los dos CD-ROMs
         sed -i 's/^ide0:0.present = .*/ide0:0.present = "FALSE"/g' "$VMX"
         sed -i 's/^ide0:1.present = .*/ide0:1.present = "FALSE"/g' "$VMX"
         
-        # Cambiar el orden de arranque para que el Disco Duro sea el primero
+        # Forzar arranque desde el Disco Duro
         sed -i '/^bios.bootOrder/d' "$VMX"
         echo 'bios.bootOrder = "hdd"' >> "$VMX"
         
-        # 3. Recargar y encender
+        # Recargar y Encender
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
-        echo "✅ VM apagada, CDs desconectados y arranque cambiado al disco duro."
+        echo "✅ VM encendida desde el disco duro."
       args: { executable: /bin/sh }
