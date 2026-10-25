@@ -1,12 +1,77 @@
 ---
-- name: Instalar Wazuh Manager All-in-One (Desatendido)
+- name: Reinstalar Wazuh Manager (Borrar todo + Instalar de nuevo)
   hosts: all
   gather_facts: yes
   become: yes
 
   tasks:
-    # 1. INSTALAR DEPENDENCIAS BÁSICAS
-    - name: Instalar curl y dependencias necesarias
+    # ==========================================
+    # FASE 1: ELIMINAR COMPLETAMENTE WAZUH
+    # ==========================================
+    - name: Detener servicios de Wazuh (por si acaso están corriendo)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - wazuh-manager
+        - wazuh-indexer
+        - wazuh-dashboard
+        - wazuh-agent
+      ignore_errors: yes
+
+    - name: Descargar el script de instalación/desinstalación de Wazuh
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
+        dest: "/tmp/wazuh-install.sh"
+        mode: '0755'
+
+    - name: Ejecutar la desinstalación oficial de Wazuh
+      ansible.builtin.shell: |
+        bash /tmp/wazuh-install.sh --uninstall
+      args:
+        executable: /bin/bash
+      register: wazuh_uninstall_output
+      failed_when: false  # No fallar si no había nada instalado
+      changed_when: "'Wazuh uninstalled' in wazuh_uninstall_output.stdout"
+
+    - name: Eliminar directorios residuales de Wazuh (limpieza profunda)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/ossec
+        - /var/lib/wazuh-indexer
+        - /etc/wazuh-indexer
+        - /etc/wazuh-dashboard
+        - /usr/share/wazuh-indexer
+        - /usr/share/wazuh-dashboard
+        - /etc/wazuh
+        - /var/log/wazuh-install.log
+        - /tmp/wazuh-install-files.tar
+
+    - name: Limpiar paquetes residuales de Wazuh
+      ansible.builtin.apt:
+        name:
+          - wazuh-manager
+          - wazuh-indexer
+          - wazuh-dashboard
+          - wazuh-agent
+        state: absent
+        purge: yes
+        autoremove: yes
+      ignore_errors: yes
+
+    - name: Reparar dpkg (por si la desinstalación dejó algo a medias)
+      ansible.builtin.shell: |
+        dpkg --configure -a
+        apt-get -f install -y
+      changed_when: false
+
+    # ==========================================
+    # FASE 2: INSTALAR WAZUH MANAGER (ALL-IN-ONE)
+    # ==========================================
+    - name: Instalar dependencias necesarias (curl, gnupg, apt-transport-https)
       ansible.builtin.apt:
         name:
           - curl
@@ -15,15 +80,7 @@
         state: present
         update_cache: yes
 
-    # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN (URL ESPECÍFICA QUE SÍ FUNCIONA)
-    - name: Descargar el script de instalación de Wazuh (v4.14)
-      ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
-        dest: "/tmp/wazuh-install.sh"
-        mode: '0755'
-
-    # 3. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
-    - name: Ejecutar la instalación desatendida de Wazuh
+    - name: Ejecutar la instalación desatendida de Wazuh (All-in-One)
       ansible.builtin.shell: |
         bash /tmp/wazuh-install.sh -a -i
       args:
@@ -33,15 +90,15 @@
         - wazuh_install_output.rc != 0
         - "'Installation finished' not in wazuh_install_output.stdout"
 
-    # 4. MOSTRAR LAS CREDENCIALES GENERADAS
-    - name: Mostrar las credenciales de acceso
+    - name: Mostrar las credenciales generadas
       ansible.builtin.debug:
         msg: 
-          - "La instalación ha finalizado. Busca en el log las líneas con 'The password for admin is:' y 'The password for wazuh is:'"
-          - "También puedes extraerlas con: tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
+          - "La instalación ha finalizado. Busca en el log de la tarea anterior las líneas:"
+          - "'The password for admin is:'"
+          - "'The password for wazuh is:'"
+          - "Guarda esas contraseñas para acceder al Dashboard."
 
-    # 5. VERIFICAR QUE EL SERVICIO ESTÁ ACTIVO
-    - name: Verificar el estado del servicio wazuh-manager
+    - name: Verificar que el servicio wazuh-manager esté activo
       ansible.builtin.systemd:
         name: wazuh-manager
         state: started
@@ -52,4 +109,4 @@
         msg:
           - "Wazuh Dashboard disponible en: https://{{ ansible_default_ipv4.address }}"
           - "Usuario: admin"
-          - "Contraseña: (extraer del archivo wazuh-passwords.txt)"
+          - "Contraseña: (extraer del log de instalación)"
