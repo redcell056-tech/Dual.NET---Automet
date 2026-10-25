@@ -83,8 +83,9 @@
         name: "{{ vm_name }}"
         guest_id: "ubuntu64Guest"
         datastore: "{{ datastore }}"
-        hardware: { memory_mb: 2048, num_cpus: 2 }
-        disk: [{ size_gb: 20, type: thin }]
+        # --- AQUÍ ESTÁN LOS CAMBIOS: 8GB RAM y 50GB DISCO ---
+        hardware: { memory_mb: 8192, num_cpus: 4 }
+        disk: [{ size_gb: 50, type: thin }]
         networks: [{ name: "VM Network", device_type: "vmxnet3" }]
         cdrom: [{ type: "iso", iso_path: "{{ vm_name }}/{{ seed_iso_datastore }}" }]
         state: present
