@@ -1,69 +1,77 @@
 ---
-- name: Instalar y configurar Nginx
+- name: Instalar y configurar Wazuh Agent
   hosts: all
   gather_facts: yes
   become: yes
 
   vars:
-    # Puerto en el que escuchará Nginx
-    nginx_port: 80
-    # Mensaje que aparecerá en la página de bienvenida
-    welcome_message: "¡Hola desde Dual.NET! Nginx instalado correctamente."
+    # --- VARIABLE QUE EL USUARIO DEFINE AL EJECUTAR ---
+    # Si el Manager está en el mismo servidor, usa "localhost" o "127.0.0.1"
+    # Si está en otro host, pon su hostname o IP aquí.
+    wazuh_manager: "192.168.1.70"  # <--- CAMBIA ESTO O DÉJALO VACÍO
+    wazuh_agent_name: "{{ inventory_hostname }}"
 
   tasks:
-    # 1. ACTUALIZAR EL ÍNDICE DE PAQUETES
-    - name: Actualizar el índice de paquetes
+    # 1. INSTALAR DEPENDENCIAS
+    - name: Instalar dependencias necesarias (curl, gnupg)
       ansible.builtin.apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
-    # 2. INSTALAR NGINX
-    - name: Instalar Nginx
-      ansible.builtin.apt:
-        name: nginx
+        name:
+          - curl
+          - gnupg
+          - apt-transport-https
         state: present
+        update_cache: yes
 
-    # 3. ASEGURAR QUE EL SERVICIO ESTÉ ACTIVO Y HABILITADO
-    - name: Iniciar y habilitar Nginx
-      ansible.builtin.systemd:
-        name: nginx
-        state: started
-        enabled: yes
+    # 2. AGREGAR LA CLAVE GPG DE WAZUH
+    - name: Agregar la llave GPG de Wazuh
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+        chmod 644 /usr/share/keyrings/wazuh.gpg
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
 
-    # 4. CREAR UNA PÁGINA DE BIENVENIDA PERSONALIZADA
-    - name: Crear página de bienvenida
+    # 3. AGREGAR EL REPOSITORIO DE WAZUH
+    - name: Agregar el repositorio de Wazuh
       ansible.builtin.copy:
-        dest: /var/www/html/index.html
+        dest: /etc/apt/sources.list.d/wazuh.list
         content: |
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>Dual.NET - Nginx</title>
-              <style>
-                  body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-                  h1 { color: #0ea5e9; }
-              </style>
-          </head>
-          <body>
-              <h1>{{ welcome_message }}</h1>
-              <p>Servidor: {{ inventory_hostname }}</p>
-              <p>IP: {{ ansible_default_ipv4.address }}</p>
-          </body>
-          </html>
+          deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main
         mode: '0644'
 
-    # 5. VERIFICAR QUE NGINX RESPONDE
-    - name: Verificar que Nginx responde en el puerto {{ nginx_port }}
-      ansible.builtin.uri:
-        url: "http://localhost:{{ nginx_port }}"
-        return_content: yes
-      register: nginx_check
-      failed_when: nginx_check.status != 200
+    # 4. ACTUALIZAR EL ÍNDICE DE PAQUETES
+    - name: Actualizar el índice de paquetes después de agregar el repo
+      ansible.builtin.apt:
+        update_cache: yes
 
-    # 6. MOSTRAR EL RESULTADO
-    - name: Mostrar el estado del servidor web
+    # 5. INSTALAR EL AGENTE DE WAZUH
+    - name: Instalar el agente de Wazuh
+      ansible.builtin.apt:
+        name: wazuh-agent
+        state: present
+
+    # 6. CONFIGURAR EL AGENTE PARA APUNTAR AL MANAGER
+    - name: Configurar la IP del Wazuh Manager en el agente
+      ansible.builtin.lineinfile:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<address>.*</address>'
+        line: "    <address>{{ wazuh_manager }}</address>"
+        backup: yes
+
+    # 7. HABILITAR E INICIAR EL SERVICIO
+    - name: Recargar systemd y habilitar el servicio wazuh-agent
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    # 8. VERIFICAR EL ESTADO
+    - name: Verificar que el agente de Wazuh está corriendo
+      ansible.builtin.command: systemctl status wazuh-agent
+      register: wazuh_status
+      changed_when: false
+      failed_when: wazuh_status.rc != 0
+
+    - name: Mostrar el estado del agente de Wazuh
       ansible.builtin.debug:
-        msg:
-          - "Nginx se ha instalado y configurado correctamente."
-          - "Accede a la página web en: http://{{ ansible_default_ipv4.address }}:{{ nginx_port }}"
-          - "La página de bienvenida debería mostrar el mensaje personalizado."
+        msg: "{{ wazuh_status.stdout_lines }}"
