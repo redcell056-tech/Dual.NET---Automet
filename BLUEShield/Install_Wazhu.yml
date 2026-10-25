@@ -1,47 +1,25 @@
 ---
-- name: Reinstalar Wazuh Manager (Limpieza agresiva + Instalación)
+- name: Limpieza profunda antes de reinstalar Wazuh
   hosts: all
   gather_facts: yes
   become: yes
 
   tasks:
-    # ==========================================
-    # FASE 1: ELIMINAR COMPLETAMENTE WAZUH
-    # ==========================================
-    - name: Detener servicios de Wazuh (por si acaso)
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        state: stopped
-        enabled: no
-      loop:
-        - wazuh-manager
-        - wazuh-indexer
-        - wazuh-dashboard
-        - wazuh-agent
-      ignore_errors: yes
-
-    - name: Eliminar scripts de desinstalación rotos (evita errores de dpkg)
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /var/lib/dpkg/info/wazuh-manager.prerm
-        - /var/lib/dpkg/info/wazuh-manager.postrm
-        - /var/lib/dpkg/info/wazuh-dashboard.prerm
-        - /var/lib/dpkg/info/wazuh-dashboard.postrm
-        - /var/lib/dpkg/info/wazuh-indexer.prerm
-        - /var/lib/dpkg/info/wazuh-indexer.postrm
-        - /var/lib/dpkg/info/wazuh-agent.prerm
-        - /var/lib/dpkg/info/wazuh-agent.postrm
-
-    - name: Forzar la purga de los paquetes de Wazuh
+    # 1. DETENER CUALQUIER PROCESO DE WAZUH
+    - name: Matar procesos de Wazuh y Ossec
       ansible.builtin.shell: |
-        dpkg --purge --force-all wazuh-dashboard wazuh-indexer wazuh-manager wazuh-agent filebeat 2>/dev/null || true
-      args:
-        executable: /bin/bash
+        pkill -9 -f wazuh || true
+        pkill -9 -f ossec || true
       changed_when: false
 
-    - name: Eliminar directorios residuales de Wazuh (limpieza profunda)
+    # 2. DESINSTALAR PAQUETES (FORZANDO)
+    - name: Forzar purga de paquetes de Wazuh
+      ansible.builtin.shell: |
+        dpkg --purge --force-all wazuh-dashboard wazuh-indexer wazuh-manager wazuh-agent filebeat 2>/dev/null || true
+      changed_when: false
+
+    # 3. ELIMINAR DIRECTORIOS DE WAZUH (LOS QUE OCUPAN MÁS ESPACIO)
+    - name: Eliminar directorios de datos y configuración de Wazuh
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
@@ -54,70 +32,49 @@
         - /etc/wazuh
         - /usr/share/wazuh-indexer
         - /usr/share/wazuh-dashboard
+        - /var/log/wazuh-indexer
+        - /var/log/wazuh-dashboard
         - /var/log/wazuh-install.log
-        - /tmp/wazuh-install-files.tar
         - /tmp/wazuh-install.sh
+        - /tmp/wazuh-install-files.tar
+        - /tmp/wazuh-install-files
 
-    - name: Limpiar cgroups residuales y recargar systemd
+    # 4. LIMPIAR CACHÉ DE APT Y PAQUETES DESCARGADOS
+    - name: Limpiar caché de APT y paquetes .deb
       ansible.builtin.shell: |
-        systemctl daemon-reload
-        systemctl reset-failed wazuh-manager.service 2>/dev/null || true
-        systemctl reset-failed wazuh-indexer.service 2>/dev/null || true
-        systemctl reset-failed wazuh-dashboard.service 2>/dev/null || true
+        apt-get clean
+        rm -rf /var/cache/apt/archives/*.deb
+        apt-get autoremove -y
       changed_when: false
 
-    - name: Reparar dpkg y limpiar paquetes rotos
+    # 5. LIMPIAR TEMPORALES DE DPKG
+    - name: Limpiar archivos temporales de dpkg
+      ansible.builtin.shell: |
+        rm -rf /var/lib/dpkg/tmp.ci
+        rm -rf /var/lib/dpkg/info/*.dpkg-new
+        rm -rf /var/lib/dpkg/info/*.dpkg-tmp
+      changed_when: false
+
+    # 6. LIMPIAR LOGS VIEJOS DEL SISTEMA (OPCIONAL, LIBERA ESPACIO)
+    - name: Reducir logs del sistema
+      ansible.builtin.shell: |
+        journalctl --vacuum-size=50M
+      changed_when: false
+
+    # 7. REPARAR DPKG Y ACTUALIZAR
+    - name: Reparar dpkg y actualizar índice
       ansible.builtin.shell: |
         dpkg --configure -a
         apt-get -f install -y
-        apt-get autoremove -y
-        apt-get clean
+        apt-get update
       changed_when: false
 
-    - name: Actualizar el índice de paquetes
-      ansible.builtin.apt:
-        update_cache: yes
+    # 8. VERIFICAR ESPACIO LIBRE
+    - name: Mostrar espacio libre en disco
+      ansible.builtin.command: df -h
+      register: disk_space
+      changed_when: false
 
-    # ==========================================
-    # FASE 2: INSTALAR WAZUH MANAGER (ALL-IN-ONE)
-    # ==========================================
-    - name: Descargar el script de instalación de Wazuh
-      ansible.builtin.get_url:
-        url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
-        dest: "/tmp/wazuh-install.sh"
-        mode: '0755'
-        force: yes
-
-    - name: Ejecutar la instalación desatendida de Wazuh (All-in-One)
-      ansible.builtin.shell: |
-        bash /tmp/wazuh-install.sh -a -i
-      args:
-        executable: /bin/bash
-      register: wazuh_install_output
-      failed_when: false  # No fallar aquí, lo comprobamos después
-      changed_when: "'Installation finished' in wazuh_install_output.stdout"
-
-    - name: Verificar si la instalación terminó correctamente
-      ansible.builtin.fail:
-        msg: "La instalación de Wazuh falló. Revisa el log: {{ wazuh_install_output.stdout }}"
-      when: "'Installation finished' not in wazuh_install_output.stdout"
-
-    - name: Mostrar las credenciales generadas
+    - name: Resultado del espacio
       ansible.builtin.debug:
-        msg: 
-          - "La instalación ha finalizado. Busca en el log las líneas:"
-          - "'The password for admin is:'"
-          - "'The password for wazuh is:'"
-
-    - name: Verificar que el servicio wazuh-manager esté activo
-      ansible.builtin.systemd:
-        name: wazuh-manager
-        state: started
-        enabled: yes
-
-    - name: Mostrar la URL del Dashboard
-      ansible.builtin.debug:
-        msg:
-          - "Wazuh Dashboard disponible en: https://{{ ansible_default_ipv4.address }}"
-          - "Usuario: admin"
-          - "Contraseña: (extraer del log de instalación)"
+        msg: "{{ disk_space.stdout_lines }}"
