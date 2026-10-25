@@ -3,6 +3,10 @@
   hosts: all
   gather_facts: yes
   become: yes
+  
+  vars:
+    # --- CONTRASEÑA PARA SUDO (La misma que usas por SSH) ---
+    ansible_become_password: "!Urielito2001"
 
   tasks:
     # 1. INSTALAR DEPENDENCIAS BÁSICAS
@@ -16,7 +20,6 @@
         update_cache: yes
 
     # 2. DESCARGAR EL SCRIPT DE INSTALACIÓN OFICIAL
-    # Usamos la versión 4.14 que es la que ha funcionado en tus pruebas
     - name: Descargar el script de instalación de Wazuh (v4.14)
       ansible.builtin.get_url:
         url: "https://packages.wazuh.com/4.14/wazuh-install.sh"
@@ -25,8 +28,6 @@
         force: yes
 
     # 3. EJECUTAR LA INSTALACIÓN ALL-IN-ONE
-    # -a: Instala Manager + Indexer + Dashboard en el mismo host
-    # -i: Ignora el chequeo de hardware (útil si tu VM no llega a los 8GB recomendados)
     - name: Ejecutar la instalación desatendida de Wazuh
       ansible.builtin.shell: |
         bash /tmp/wazuh-install.sh -a -i
@@ -38,11 +39,10 @@
         - "'Installation finished' not in wazuh_install_output.stdout"
 
     # 4. MOSTRAR LAS CREDENCIALES GENERADAS
-    # El script genera contraseñas aleatorias al final. Las mostramos en el log.
     - name: Mostrar las credenciales de acceso
       ansible.builtin.debug:
         msg: 
-          - "La instalación ha finalizado. Busca en el log de la tarea anterior las líneas:"
+          - "La instalación ha finalizado. Busca en el log de las líneas:"
           - "'The password for admin is:'"
           - "'The password for wazuh is:'"
           - "También puedes extraerlas con: tar -O -xvf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
@@ -60,4 +60,4 @@
         msg:
           - "Wazuh Dashboard disponible en: https://{{ ansible_default_ipv4.address }}"
           - "Usuario: admin"
-          - "Contraseña: (extraer del log de instalación o del archivo wazuh-passwords.txt)"
+          - "Contraseña: (extraer del log de instalación)"
