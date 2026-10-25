@@ -1,0 +1,124 @@
+---
+- name: Crear y configurar VM Ubuntu en ESXi
+  hosts: all
+  gather_facts: no
+  
+  vars:
+    vm_name: "ubuntu-wazuh"
+    datastore: "datastore1"
+    iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
+    seed_dir: "/tmp/ubuntu-seed-{{ vm_name }}"
+    seed_iso_local: "/tmp/{{ vm_name }}-seed.iso"
+    seed_iso_datastore: "seed-{{ vm_name }}.iso"
+    new_vm_user: "redcell"
+    new_vm_pass_hash: "$6$TSdKIBtDj1eTkodP$fEiWUkgXCdoN4BQukMLd4Hh8vH1Scuz73wn9D7NZkx.xbOX.ZNIcQ/jYSjNWD.CRknG5e3GLZfCkC2caL3peL0"
+
+  tasks:
+    - name: Guardar credenciales del host remoto
+      set_fact:
+        esxi_ip: "{{ hostvars[inventory_hostname]['ansible_host'] }}"
+        esxi_user: "{{ hostvars[inventory_hostname]['ansible_user'] }}"
+        esxi_pass: "{{ hostvars[inventory_hostname]['ansible_ssh_pass'] }}"
+
+    - name: Destruir VM anterior si existe
+      shell: |
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        if [ -n "$VMID" ]; then
+          vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+          sleep 2
+          vim-cmd vmsvc/destroy $VMID || true
+        fi
+      changed_when: false
+
+    - name: Crear carpeta de la VM en el datastore
+      raw: mkdir -p /vmfs/volumes/{{ datastore }}/{{ vm_name }}
+
+    - name: Crear archivos cloud-init
+      block:
+        - name: Crear directorio local
+          file: { path: "{{ seed_dir }}", state: directory }
+          delegate_to: localhost
+        
+        - name: Escribir user-data
+          copy:
+            dest: "{{ seed_dir }}/user-data"
+            content: |
+              #cloud-config
+              bootcmd:
+                - cat /proc/cmdline > /tmp/cmdline
+                - sed -i'' 's/$/ autoinstall/g' /tmp/cmdline
+                - mount -n --bind -o ro /tmp/cmdline /proc/cmdline
+              autoinstall:
+                version: 1
+                identity:
+                  hostname: {{ vm_name }}
+                  username: {{ new_vm_user }}
+                  password: "{{ new_vm_pass_hash }}"
+                ssh: { install-server: true, allow-pw: true }
+                storage: { layout: { name: direct } }
+                late-commands:
+                  - curtin in-target --target=/target -- apt-get update
+                  - curtin in-target --target=/target -- apt-get install -y open-vm-tools
+          delegate_to: localhost
+
+        - name: Escribir meta-data
+          copy: { dest: "{{ seed_dir }}/meta-data", content: "" }
+          delegate_to: localhost
+        
+        - name: Generar ISO localmente
+          command: genisoimage -output {{ seed_iso_local }} -volid cidata -joliet -rock {{ seed_dir }}/user-data {{ seed_dir }}/meta-data
+          delegate_to: localhost
+
+    - name: Subir ISO a la carpeta de la VM en ESXi
+      shell: |
+        sshpass -p '{{ esxi_pass }}' scp -o StrictHostKeyChecking=no \
+          {{ seed_iso_local }} {{ esxi_user }}@{{ esxi_ip }}:/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ seed_iso_datastore }}
+      delegate_to: localhost
+
+    - name: Crear la VM en ESXi
+      zaki_lknr.esxissh.esxissh_guest:
+        esxiaddress: "{{ esxi_ip }}"
+        esxiusername: "{{ esxi_user }}"
+        esxipassword: "{{ esxi_pass }}"
+        name: "{{ vm_name }}"
+        guest_id: "ubuntu64Guest"
+        datastore: "{{ datastore }}"
+        hardware: { memory_mb: 2048, num_cpus: 2 }
+        disk: [{ size_gb: 20, type: thin }]
+        networks: [{ name: "VM Network", device_type: "vmxnet3" }]
+        cdrom: [{ type: "iso", iso_path: "{{ vm_name }}/{{ seed_iso_datastore }}" }]
+        state: present
+      delegate_to: localhost
+
+    - name: Configurar CD-ROMs y encender
+      shell: |
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+        sleep 2
+        VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
+        sed -i '/^ide[01]:[0-9]\./d' "$VMX"
+        cat >> "$VMX" << EOF
+        ide0:0.present = "TRUE"
+        ide0:0.deviceType = "cdrom-image"
+        ide0:0.filename = "/vmfs/volumes/{{ datastore }}/{{ iso_rel_path }}"
+        ide0:1.present = "TRUE"
+        ide0:1.deviceType = "cdrom-image"
+        ide0:1.filename = "/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ seed_iso_datastore }}"
+        bios.bootOrder = "cdrom,hdd"
+        EOF
+        vim-cmd vmsvc/reload $VMID
+        sleep 2
+        vim-cmd vmsvc/power.on $VMID
+      args: { executable: /bin/sh }
+
+    - name: Esperar IP de la VM
+      shell: |
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        for i in $(seq 1 90); do
+          IP=$(vim-cmd vmsvc/get.guest $VMID | grep -m1 'ipAddress = "' | sed 's/.*ipAddress = "\(.*\)".*/\1/')
+          if [ -n "$IP" ] && [ "$IP" != "0.0.0.0" ]; then
+            echo "¡VM con IP! -> $IP"
+            exit 0
+          fi
+          sleep 10
+        done
