@@ -1,0 +1,60 @@
+---
+- name: Instalar Tenable Nessus en Ubuntu
+  hosts: all
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    # --- URL EXACTA QUE FUNCIONA (versión 10.12.6) ---
+    nessus_deb_file: "Nessus-10.12.6-ubuntu1604_amd64.deb"
+    nessus_download_url: "https://www.tenable.com/downloads/api/v2/pages/nessus/files/{{ nessus_deb_file }}"
+    
+    # --- CÓDIGO DE ACTIVACIÓN REAL ---
+    nessus_activation_code: "S9VL-CVBY-WMCV-BYWK-4SKF"
+
+  tasks:
+    # 1. INSTALAR DEPENDENCIAS
+    - name: Instalar dependencias necesarias (curl, dpkg)
+      ansible.builtin.apt:
+        name:
+          - curl
+          - dpkg
+        state: present
+        update_cache: yes
+
+    # 2. DESCARGAR EL PAQUETE .DEB
+    - name: Descargar el paquete de Nessus
+      ansible.builtin.get_url:
+        url: "{{ nessus_download_url }}"
+        dest: "/tmp/{{ nessus_deb_file }}"
+        mode: '0644'
+        force: yes
+
+    # 3. INSTALAR NESSUS
+    - name: Instalar Nessus con dpkg
+      ansible.builtin.apt:
+        deb: "/tmp/{{ nessus_deb_file }}"
+        state: present
+
+    # 4. ASEGURAR QUE EL SERVICIO ESTÉ ACTIVO
+    - name: Iniciar y habilitar el servicio Nessus
+      ansible.builtin.systemd:
+        name: nessusd
+        state: started
+        enabled: yes
+
+    # 5. REGISTRAR LA LICENCIA (ACTIVACIÓN CON CÓDIGO REAL)
+    - name: Registrar Nessus con el código de activación
+      ansible.builtin.command: >
+        /opt/nessus/sbin/nessuscli fetch --register {{ nessus_activation_code }}
+      register: nessus_register_output
+      changed_when: "'Thank you' in nessus_register_output.stdout or 'registered' in nessus_register_output.stdout"
+      failed_when: nessus_register_output.rc != 0
+
+    # 6. MOSTRAR INFORMACIÓN DE ACCESO
+    - name: Mostrar la URL de acceso a Nessus
+      ansible.builtin.debug:
+        msg:
+          - "Nessus se ha instalado y registrado correctamente."
+          - "Accede a la interfaz web en: https://{{ ansible_default_ipv4.address }}:8834"
+          - "Espera unos minutos mientras se descargan los plugins iniciales."
