@@ -1,0 +1,69 @@
+---
+- name: Instalar y configurar Nginx
+  hosts: all
+  gather_facts: yes
+  become: yes
+
+  vars:
+    # Puerto en el que escuchará Nginx
+    nginx_port: 80
+    # Mensaje que aparecerá en la página de bienvenida
+    welcome_message: "¡Hola desde Dual.NET! Nginx instalado correctamente."
+
+  tasks:
+    # 1. ACTUALIZAR EL ÍNDICE DE PAQUETES
+    - name: Actualizar el índice de paquetes
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # 2. INSTALAR NGINX
+    - name: Instalar Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    # 3. ASEGURAR QUE EL SERVICIO ESTÉ ACTIVO Y HABILITADO
+    - name: Iniciar y habilitar Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    # 4. CREAR UNA PÁGINA DE BIENVENIDA PERSONALIZADA
+    - name: Crear página de bienvenida
+      ansible.builtin.copy:
+        dest: /var/www/html/index.html
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Dual.NET - Nginx</title>
+              <style>
+                  body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+                  h1 { color: #0ea5e9; }
+              </style>
+          </head>
+          <body>
+              <h1>{{ welcome_message }}</h1>
+              <p>Servidor: {{ inventory_hostname }}</p>
+              <p>IP: {{ ansible_default_ipv4.address }}</p>
+          </body>
+          </html>
+        mode: '0644'
+
+    # 5. VERIFICAR QUE NGINX RESPONDE
+    - name: Verificar que Nginx responde en el puerto {{ nginx_port }}
+      ansible.builtin.uri:
+        url: "http://localhost:{{ nginx_port }}"
+        return_content: yes
+      register: nginx_check
+      failed_when: nginx_check.status != 200
+
+    # 6. MOSTRAR EL RESULTADO
+    - name: Mostrar el estado del servidor web
+      ansible.builtin.debug:
+        msg:
+          - "Nginx se ha instalado y configurado correctamente."
+          - "Accede a la página web en: http://{{ ansible_default_ipv4.address }}:{{ nginx_port }}"
+          - "La página de bienvenida debería mostrar el mensaje personalizado."
