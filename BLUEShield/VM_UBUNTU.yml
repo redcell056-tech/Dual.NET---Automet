@@ -122,3 +122,32 @@
           fi
           sleep 10
         done
+
+    # =========================================================
+    # NUEVA TAREA FINAL: DESCONECTAR CD Y CAMBIAR EL ORDEN DE ARRANQUE
+    # =========================================================
+    - name: Apagar la VM y desconectar los CD-ROMs para que arranque del disco duro
+      shell: |
+        VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
+        
+        # 1. Apagar la VM
+        vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
+        sleep 3
+        
+        # 2. Editar el archivo .vmx
+        VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
+        
+        # Desconectar los dos CD-ROM (poner present = FALSE)
+        sed -i 's/^ide0:0.present = .*/ide0:0.present = "FALSE"/g' "$VMX"
+        sed -i 's/^ide0:1.present = .*/ide0:1.present = "FALSE"/g' "$VMX"
+        
+        # Cambiar el orden de arranque para que el Disco Duro sea el primero
+        sed -i '/^bios.bootOrder/d' "$VMX"
+        echo 'bios.bootOrder = "hdd"' >> "$VMX"
+        
+        # 3. Recargar y encender
+        vim-cmd vmsvc/reload $VMID
+        sleep 2
+        vim-cmd vmsvc/power.on $VMID
+        echo "✅ VM apagada, CDs desconectados y arranque cambiado al disco duro."
+      args: { executable: /bin/sh }
