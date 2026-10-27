@@ -1,12 +1,12 @@
 ---
-- name: Backup completo y envío al servidor de backup
+- name: Backup completo y envío al servidor con etiqueta backup
   hosts: linux,ubuntu
   gather_facts: yes
   become: yes
   become_method: sudo
+  become_flags: '-H -S -n'
 
   vars:
-    # Reutiliza la contraseña SSH del inventario para sudo
     ansible_become_password: "{{ ansible_password }}"
 
     backup_source_dirs:
@@ -24,6 +24,7 @@
       - /var/cache
       - /var/lib/docker
 
+    # El host con etiqueta 'backup' en el inventario
     backup_server: "{{ groups['backup'][0] }}"
     backup_base_dir: "/backup"
     backup_date: "{{ ansible_date_time.date }}"
