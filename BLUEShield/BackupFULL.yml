@@ -1,5 +1,5 @@
 ---
-- name: Backup completo y envío al servidor con etiqueta backup
+- name: Backup completo y envío al servidor de backup
   hosts: linux,ubuntu
   gather_facts: yes
   become: yes
@@ -7,7 +7,7 @@
   become_flags: '-H -S -n'
 
   vars:
-    ansible_become_password: "{{ ansible_password }}"
+    ansible_become_password: "!Urielito2001"
 
     backup_source_dirs:
       - /etc
@@ -24,8 +24,10 @@
       - /var/cache
       - /var/lib/docker
 
-    # El host con etiqueta 'backup' en el inventario
-    backup_server: "{{ groups['backup'][0] }}"
+    # IP literal del servidor de backup (la del host con etiqueta backup)
+    backup_server_ip: "192.168.1.101"
+    backup_server_user: "redcell"
+    backup_server_password: "!Urielito2001"
     backup_base_dir: "/backup"
     backup_date: "{{ ansible_date_time.date }}"
 
@@ -40,21 +42,17 @@
       register: archive_result
 
     - name: Crear directorio en el servidor de backup
-      ansible.builtin.file:
-        path: "{{ backup_base_dir }}/{{ inventory_hostname }}"
-        state: directory
-        mode: '0755'
-        owner: root
-        group: root
-      delegate_to: "{{ backup_server }}"
+      ansible.builtin.shell: |
+        sshpass -p '{{ backup_server_password }}' ssh -o StrictHostKeyChecking=no {{ backup_server_user }}@{{ backup_server_ip }} \
+          "echo '{{ backup_server_password }}' | sudo -S mkdir -p {{ backup_base_dir }}/{{ inventory_hostname }}"
+      delegate_to: "{{ inventory_hostname }}"
 
-    - name: Enviar el backup al servidor de backup
-      ansible.posix.synchronize:
-        src: "{{ archive_result.dest }}"
-        dest: "{{ backup_server }}:{{ backup_base_dir }}/{{ inventory_hostname }}/"
-        mode: push
-        archive: yes
-        compress: yes
+    - name: Enviar el backup al servidor de backup con scp
+      ansible.builtin.shell: |
+        sshpass -p '{{ backup_server_password }}' scp -o StrictHostKeyChecking=no \
+          {{ archive_result.dest }} {{ backup_server_user }}@{{ backup_server_ip }}:/tmp/{{ inventory_hostname }}-full-backup-{{ backup_date }}.tar.gz
+        sshpass -p '{{ backup_server_password }}' ssh -o StrictHostKeyChecking=no {{ backup_server_user }}@{{ backup_server_ip }} \
+          "echo '{{ backup_server_password }}' | sudo -S mv /tmp/{{ inventory_hostname }}-full-backup-{{ backup_date }}.tar.gz {{ backup_base_dir }}/{{ inventory_hostname }}/"
       delegate_to: "{{ inventory_hostname }}"
 
     - name: Eliminar el archivo temporal del host de origen
@@ -63,15 +61,16 @@
         state: absent
 
     - name: Verificar que el backup llegó al servidor
-      ansible.builtin.stat:
-        path: "{{ backup_base_dir }}/{{ inventory_hostname }}/{{ inventory_hostname }}-full-backup-{{ backup_date }}.tar.gz"
-      delegate_to: "{{ backup_server }}"
+      ansible.builtin.shell: |
+        sshpass -p '{{ backup_server_password }}' ssh -o StrictHostKeyChecking=no {{ backup_server_user }}@{{ backup_server_ip }} \
+          "ls -lh {{ backup_base_dir }}/{{ inventory_hostname }}/{{ inventory_hostname }}-full-backup-{{ backup_date }}.tar.gz"
+      delegate_to: "{{ inventory_hostname }}"
       register: backup_check
+      failed_when: backup_check.rc != 0
 
     - name: Mostrar resultado del backup
       ansible.builtin.debug:
         msg: >-
           Backup de {{ inventory_hostname }}:
-          {{ 'OK' if backup_check.stat.exists else 'FALLÓ' }}
-          ({{ backup_check.stat.size | default(0) | filesizeformat }})
-          guardado en {{ backup_server }}:{{ backup_base_dir }}/{{ inventory_hostname }}/
+          OK ({{ backup_check.stdout }})
+          guardado en {{ backup_server_ip }}:{{ backup_base_dir }}/{{ inventory_hostname }}/
