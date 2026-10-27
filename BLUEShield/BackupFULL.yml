@@ -3,8 +3,12 @@
   hosts: linux,ubuntu
   gather_facts: yes
   become: yes
+  become_method: sudo
 
   vars:
+    # Reutiliza la contraseña SSH del inventario para sudo
+    ansible_become_password: "{{ ansible_password }}"
+
     backup_source_dirs:
       - /etc
       - /home
@@ -20,7 +24,6 @@
       - /var/cache
       - /var/lib/docker
 
-    # El servidor de backup es el host con etiqueta 'backup' en el inventario
     backup_server: "{{ groups['backup'][0] }}"
     backup_base_dir: "/backup"
     backup_date: "{{ ansible_date_time.date }}"
