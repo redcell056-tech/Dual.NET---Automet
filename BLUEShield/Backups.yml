@@ -1,8 +1,91 @@
 ---
-- name: Backups
-  hosts: all
+- name: Backup completo y envío al servidor de backup
+  hosts: linux,ubuntu
   gather_facts: yes
+  become: yes
+
+  vars:
+    # --- CONTRASEÑA PARA SUDO (La misma que usas por SSH) ---
+    ansible_become_password: "!Urielito2001"
+
+    # --- CONFIGURACIÓN PARA EVITAR ERRORES DE HUELLA SSH ---
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+    # --- DIRECTORIOS A RESPALDAR ---
+    backup_source_dirs:
+      - /etc
+      - /home
+      - /var/log
+      - /opt
+
+    # --- RUTAS EXCLUIDAS (evitan backups gigantes e inútiles) ---
+    backup_exclude_paths:
+      - /proc
+      - /sys
+      - /dev
+      - /run
+      - /tmp
+      - /var/cache
+      - /var/lib/docker
+
+    # --- SERVIDOR DE BACKUP (primer host del grupo 'backup') ---
+    backup_server: "{{ groups['backup'][0] }}"
+
+    # --- DIRECTORIO BASE EN EL SERVIDOR DE BACKUP ---
+    backup_base_dir: "/backup"
+
+    # --- FECHA PARA EL NOMBRE DEL ARCHIVO ---
+    backup_date: "{{ ansible_date_time.date }}"
+
   tasks:
-    - name: Tarea de prueba
+    # 1. CREAR EL ARCHIVO COMPRIMIDO EN EL HOST DE ORIGEN
+    - name: Crear archivo comprimido de backup
+      ansible.builtin.archive:
+        path: "{{ backup_source_dirs }}"
+        dest: "/tmp/{{ inventory_hostname }}-full-backup-{{ backup_date }}.tar.gz"
+        format: gz
+        force_archive: yes
+        exclude_path: "{{ backup_exclude_paths }}"
+      register: archive_result
+
+    # 2. CREAR EL DIRECTORIO EN EL SERVIDOR DE BACKUP (CON NOMBRE DEL HOST)
+    - name: Crear directorio en el servidor de backup
+      ansible.builtin.file:
+        path: "{{ backup_base_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+      delegate_to: "{{ backup_server }}"
+
+    # 3. ENVIAR EL BACKUP AL SERVIDOR MEDIANTE RSYNC
+    - name: Enviar el backup al servidor de backup
+      ansible.posix.synchronize:
+        src: "{{ archive_result.dest }}"
+        dest: "{{ backup_base_dir }}/{{ inventory_hostname }}/"
+        mode: push
+        archive: yes
+        compress: yes
+      delegate_to: "{{ inventory_hostname }}"
+
+    # 4. ELIMINAR EL ARCHIVO TEMPORAL DEL HOST DE ORIGEN
+    - name: Eliminar el archivo temporal del host de origen
+      ansible.builtin.file:
+        path: "{{ archive_result.dest }}"
+        state: absent
+
+    # 5. VERIFICAR QUE EL BACKUP LLEGÓ AL SERVIDOR
+    - name: Verificar que el backup llegó al servidor
+      ansible.builtin.stat:
+        path: "{{ backup_base_dir }}/{{ inventory_hostname }}/{{ inventory_hostname }}-full-backup-{{ backup_date }}.tar.gz"
+      delegate_to: "{{ backup_server }}"
+      register: backup_check
+
+    # 6. MOSTRAR EL RESULTADO
+    - name: Mostrar resultado del backup
       ansible.builtin.debug:
-        msg: "Ejecutando en { inventory_hostname }"
+        msg: >-
+          Backup de {{ inventory_hostname }}:
+          {{ 'OK' if backup_check.stat.exists else 'FALLÓ' }}
+          ({{ backup_check.stat.size | default(0) | filesizeformat }})
+          guardado en {{ backup_server }}:{{ backup_base_dir }}/{{ inventory_hostname }}/
