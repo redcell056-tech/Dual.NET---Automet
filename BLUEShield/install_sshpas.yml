@@ -1,8 +1,17 @@
 ---
-- name: install sshpas
+- name: Instalar sshpass y rsync en todos los Ubuntu
   hosts: ubuntu
   gather_facts: yes
+  become: yes
+  vars:
+    ansible_become_password: "!Urielito2001"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
   tasks:
-    - name: Tarea de prueba
-      ansible.builtin.debug:
-        msg: "Ejecutando en {{ inventory_hostname }}"
+    - name: Instalar sshpass y rsync
+      ansible.builtin.apt:
+        name:
+          - sshpass
+          - rsync
+        state: present
+        update_cache: yes
