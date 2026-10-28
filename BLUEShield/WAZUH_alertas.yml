@@ -1,0 +1,8 @@
+---
+- name: WAZUH alertas
+  hosts: wazhu
+  gather_facts: yes
+  tasks:
+    - name: Tarea de prueba
+      ansible.builtin.debug:
+        msg: "Ejecutando en {{ inventory_hostname }}"
