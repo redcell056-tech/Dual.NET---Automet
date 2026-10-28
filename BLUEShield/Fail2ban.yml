@@ -1,0 +1,184 @@
+---
+- name: Ubuntu - Fail2Ban + SSH restringido + auditoría + Telegram
+  hosts: all
+  gather_facts: yes
+  become: yes  
+    
+  vars:
+    ansible_become_password: "!Urielito2001"
+    telegram_token: "8957456397:AAEwR8owswIu4lZXsH9hJpQ95qjyDxgmPjM"
+    telegram_chat_id: "8452374099"
+    upgrade_system: false
+    ssh_allowed_users:
+      - redcell
+    ssh_harden: true
+    ssh_service: ssh
+    f2b_maxretry: 2
+    f2b_findtime: 10m
+    f2b_bantime: 1h
+    f2b_maxbantime: 1w
+    f2b_ignoreip: "127.0.0.1/8 ::1"
+    f2b_recidive: true
+    enable_auditd: true
+    daily_report_hour: "8"
+    required_packages:
+      - fail2ban
+      - curl
+    audit_packages:
+      - auditd
+    connecting_user: "{{ ansible_env.SUDO_USER | default(ansible_user | default(ansible_user_id)) }}"
+
+  tasks:
+    # ---------- 1. INSTALAR PAQUETES (CON REINTENTO) ----------
+    - name: Instalar paquetes faltantes (con reintento por lock)
+      ansible.builtin.apt:
+        name: "{{ required_packages + (audit_packages if enable_auditd else []) }}"
+        state: present
+        lock_timeout: 300
+        update_cache: yes
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: apt_install
+      until: apt_install is success
+      retries: 5
+      delay: 10
+
+    # ---------- 2. SSH Y SUDO ----------
+    - name: Restringir SSH a usuarios permitidos
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*AllowUsers'
+        line: "AllowUsers {{ ssh_allowed_users | join(' ') }}"
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: reload ssh
+
+    - name: Endurecimiento SSH adicional
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*#?\s*{{ item.key }}\b'
+        line: "{{ item.key }} {{ item.value }}"
+        validate: '/usr/sbin/sshd -t -f %s'
+      loop:
+        - { key: PermitRootLogin, value: "no" }
+        - { key: MaxAuthTries, value: "3" }
+        - { key: LoginGraceTime, value: "30" }
+        - { key: X11Forwarding, value: "no" }
+        - { key: PermitEmptyPasswords, value: "no" }
+        - { key: LogLevel, value: "VERBOSE" }
+        - { key: PasswordAuthentication, value: "yes" }
+      when: ssh_harden
+      notify: reload ssh
+
+    # --- CONFIGURACIÓN DE NOPASSWD (CORREGIDA) ---
+    - name: Asegurar que redcell esté en el grupo sudo
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: sudo
+        append: yes
+      loop: "{{ ssh_allowed_users }}"
+
+    - name: Permitir a redcell usar sudo sin contraseña
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-redcell-nopasswd"
+        content: "{{ ssh_allowed_users | map('regex_replace', '$', ' ALL=(ALL) NOPASSWD:ALL') | join('\n') }}\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    # ---------- 3. TELEGRAM ----------
+    - name: Guardar credenciales de Telegram
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/telegram.env
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          TELEGRAM_TOKEN="{{ telegram_token }}"
+          TELEGRAM_CHAT_ID="{{ telegram_chat_id }}"
+      no_log: true
+
+    - name: Script de notificación Telegram
+      ansible.builtin.copy:
+        dest: /usr/local/bin/telegram-notify.sh
+        owner: root
+        group: root
+        mode: '0750'
+        content: |
+          #!/bin/bash
+          set -u
+          . /etc/fail2ban/telegram.env
+          HOST=$(hostname -f 2>/dev/null || hostname)
+          MSG="[${HOST}] ${1:-sin mensaje}"
+          curl -s --max-time 10 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG:0:4000}" > /dev/null || true
+
+    # ---------- 4. FAIL2BAN ----------
+    - name: Acción Telegram para Fail2Ban
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/action.d/telegram.conf
+        mode: '0644'
+        content: |
+          [Definition]
+          actionstart = /usr/local/bin/telegram-notify.sh "✅ Fail2Ban iniciado"
+          actionstop  = /usr/local/bin/telegram-notify.sh "❌ Fail2Ban detenido"
+          actioncheck =
+          actionban   = /usr/local/bin/telegram-notify.sh "🚫 IP <ip> baneada en <name> (fallos: <failures>, ban: <bantime>s)"
+          actionunban = /usr/local/bin/telegram-notify.sh "♻️ IP <ip> desbaneada en <name>"
+      notify: restart fail2ban
+
+    - name: Jails de Fail2Ban (sshd + recidive)
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/90-hardening.local
+        mode: '0644'
+        content: |
+          [DEFAULT]
+          bantime  = {{ f2b_bantime }}
+          findtime = {{ f2b_findtime }}
+          maxretry = {{ f2b_maxretry }}
+          ignoreip = {{ f2b_ignoreip }}
+          bantime.increment = true
+          bantime.maxtime   = {{ f2b_maxbantime }}
+
+          [sshd]
+          enabled  = true
+          port     = ssh
+          filter   = sshd
+          backend  = systemd
+          maxretry = {{ f2b_maxretry }}
+          action   = %(action_)s
+                     telegram
+
+          [recidive]
+          enabled  = true
+          logpath  = /var/log/fail2ban.log
+          backend  = auto
+          bantime  = {{ f2b_maxbantime }}
+          findtime = 1d
+          maxretry = 3
+          action   = %(action_)s
+                     telegram
+      notify: restart fail2ban
+
+    # ---------- 5. SERVICIOS ----------
+    - name: Asegurar servicios habilitados y activos
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop: "{{ ['fail2ban'] + (['auditd'] if enable_auditd else []) }}"
+
+    - name: Mensaje de prueba a Telegram
+      ansible.builtin.command: /usr/local/bin/telegram-notify.sh "🔧 Playbook aplicado correctamente"
+      changed_when: false
+
+  handlers:
+    - name: reload ssh
+      ansible.builtin.service:
+        name: "{{ ssh_service }}"
+        state: reloaded
+
+    - name: restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
