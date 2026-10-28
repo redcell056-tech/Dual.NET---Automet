@@ -1,8 +1,319 @@
 ---
-- name: WAZUH alertas
-  hosts: wazhu
-  gather_facts: yes
+# =============================================================================
+# Wazuh - Configuración post-instalación (alertas, FIM, logs)   [Dual.NET]
+# - NO instala Wazuh ni Postfix: asume ambos ya presentes.
+# - Idempotente: se puede ejecutar N veces sin duplicar configuración.
+# - Sin secretos: el relay SMTP local ya está autenticado.
+# =============================================================================
+- name: Wazuh - Alertas por email, FIM y control de logs
+  hosts: all                      # Dual.NET restringe a los hosts elegidos en la UI
+  become: true
+  gather_facts: false
+
+  vars:
+    # ---------- Rutas ----------
+    ossec_conf: /var/ossec/etc/ossec.conf
+    local_rules: /var/ossec/etc/rules/local_rules.xml
+
+    # ---------- Correo ----------
+    alert_email_to: "redcel056@gmail.com"
+    alert_email_from: "wazuh@dualnet.com"
+    smtp_server: "localhost"            # Relay SMTP local ya configurado
+    email_maxperhour: 30
+
+    # ---------- Niveles ----------
+    log_alert_level: 5                  # Mínimo que se escribe en alerts.log/json
+    email_alert_level: 10               # Mínimo para correo global
+    # 5710 = usuario inexistente (nivel 5, por eso va por email_alerts)
+    # 5712/5763 = fuerza bruta SSH (nivel 10)
+    ssh_rule_ids: "5710,5712,5763"
+
+    # ---------- FIM ----------
+    fim_directories:
+      - { path: /etc,          realtime: "yes", report_changes: "yes" }
+      - { path: /bin,          realtime: "yes", report_changes: "yes" }
+      - { path: /sbin,         realtime: "yes", report_changes: "yes" }
+      - { path: /var/www/html, realtime: "yes", report_changes: "yes" }
+
+    fim_ignore:                         # Archivos volátiles
+      - /etc/mtab
+      - /etc/resolv.conf
+      - /etc/random-seed
+      - /etc/random.seed
+      - /etc/adjtime
+      - /etc/hosts.deny
+      - /etc/mail/statistics
+      - /etc/utmpx
+      - /etc/wtmpx
+      - /etc/cups/certs
+      - /etc/dumpdates
+      - /var/www/html/cache
+      - /var/www/html/tmp
+    fim_ignore_regex: '.log$|.swp$|.tmp$'
+
+    # Se monitorean pero SIN diff (el diff viaja en el correo)
+    fim_nodiff:
+      - /etc/shadow
+      - /etc/gshadow
+      - /etc/ssh/ssh_host_rsa_key
+      - /etc/ssh/ssh_host_ed25519_key
+
+    # Archivos críticos que escalan a nivel 12 (PCRE2)
+    fim_critical_regex: '^/etc/(passwd|shadow|group|gshadow|sudoers|ssh/sshd_config)$|^/etc/sudoers\.d/|/\.ssh/authorized_keys$'
+
+    # ---------- Retención de logs en disco ----------
+    log_retention_days: 90
+
   tasks:
-    - name: Tarea de prueba
+    # =========================================================================
+    # 0. PRE-CHECKS
+    # =========================================================================
+    - name: Comprobar que Wazuh Manager está instalado
+      ansible.builtin.stat:
+        path: /var/ossec/bin/wazuh-control
+      register: wazuh_bin
+
+    - name: Comprobar que existen ossec.conf y local_rules.xml
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ ossec_conf }}", "{{ local_rules }}"]
+      register: wazuh_files
+
+    - name: Abortar si Wazuh no está instalado o faltan archivos de configuración
+      ansible.builtin.assert:
+        that:
+          - wazuh_bin.stat.exists
+          - wazuh_files.results | map(attribute='stat.exists') | min
+        fail_msg: "Wazuh Manager no encontrado en este host. Este playbook NO instala Wazuh."
+        quiet: true
+
+    # =========================================================================
+    # 1. OSSEC.CONF - CORREO, LOGS Y NIVELES
+    # =========================================================================
+    - name: ossec.conf - parámetros globales (correo y generación de logs)
+      ansible.builtin.lineinfile:
+        path: "{{ ossec_conf }}"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        insertafter: '^\s*<global>'
+        backup: true
+      loop:
+        - { regexp: '^\s*<jsonout_output>',     line: '    <jsonout_output>yes</jsonout_output>' }      # alerts.json
+        - { regexp: '^\s*<alerts_log>',         line: '    <alerts_log>yes</alerts_log>' }              # alerts.log
+        - { regexp: '^\s*<email_notification>', line: '    <email_notification>yes</email_notification>' }
+        - { regexp: '^\s*<smtp_server>',        line: '    <smtp_server>{{ smtp_server }}</smtp_server>' }
+        - { regexp: '^\s*<email_from>',         line: '    <email_from>{{ alert_email_from }}</email_from>' }
+        - { regexp: '^\s*<email_maxperhour>',   line: '    <email_maxperhour>{{ email_maxperhour }}</email_maxperhour>' }
+        - { regexp: '^\s*<email_log_source>',   line: '    <email_log_source>alerts.log</email_log_source>' }
+      loop_control:
+        label: "{{ item.line | trim }}"
+      notify: Reiniciar wazuh-manager
+
+    # Reemplaza SOLO el <email_to> dentro de <global> (evita duplicar destinatarios)
+    - name: ossec.conf - destinatario global
+      ansible.builtin.replace:
+        path: "{{ ossec_conf }}"
+        regexp: '(?s)(<global>(?:(?!</global>).)*?)<email_to>[^<]*</email_to>'
+        replace: '\1<email_to>{{ alert_email_to }}</email_to>'
+      notify: Reiniciar wazuh-manager
+
+    - name: ossec.conf - niveles de log y de correo
+      ansible.builtin.lineinfile:
+        path: "{{ ossec_conf }}"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        insertafter: '^\s*<alerts>'
+      loop:
+        - { regexp: '^\s*<log_alert_level>',   line: '    <log_alert_level>{{ log_alert_level }}</log_alert_level>' }
+        - { regexp: '^\s*<email_alert_level>', line: '    <email_alert_level>{{ email_alert_level }}</email_alert_level>' }
+      loop_control:
+        label: "{{ item.line | trim }}"
+      notify: Reiniciar wazuh-manager
+
+    # =========================================================================
+    # 2. OSSEC.CONF - EMAIL_ALERTS ESPECÍFICOS + SYSCHECK (bloque gestionado)
+    #    Los bloques <syscheck> posteriores sobreescriben las rutas por defecto.
+    # =========================================================================
+    - name: ossec.conf - email_alerts (SSH, FIM) y syscheck
+      ansible.builtin.blockinfile:
+        path: "{{ ossec_conf }}"
+        marker: "<!-- {mark} ANSIBLE MANAGED: DUALNET WAZUH ALERTS+FIM -->"
+        insertafter: EOF
+        backup: true
+        block: |
+          <ossec_config>
+            <!-- SSH: 5710 (nivel 5) y fuerza bruta 5712/5763, envío inmediato -->
+            <email_alerts>
+              <email_to>{{ alert_email_to }}</email_to>
+              <rule_id>{{ ssh_rule_ids }}</rule_id>
+              <do_not_delay />
+            </email_alerts>
+
+            <!-- Cualquier evento de integridad de archivos -->
+            <email_alerts>
+              <email_to>{{ alert_email_to }}</email_to>
+              <group>syscheck</group>
+            </email_alerts>
+
+            <syscheck>
+              <disabled>no</disabled>
+              <scan_on_start>yes</scan_on_start>
+          {% for d in fim_directories %}
+              <directories check_all="yes" realtime="{{ d.realtime }}" report_changes="{{ d.report_changes }}">{{ d.path }}</directories>
+          {% endfor %}
+          {% for i in fim_ignore %}
+              <ignore>{{ i }}</ignore>
+          {% endfor %}
+              <ignore type="sregex">{{ fim_ignore_regex }}</ignore>
+          {% for n in fim_nodiff %}
+              <nodiff>{{ n }}</nodiff>
+          {% endfor %}
+              <diff>
+                <disk_quota><enabled>yes</enabled><limit>1GB</limit></disk_quota>
+                <file_size><enabled>yes</enabled><max_size>50MB</max_size></file_size>
+              </diff>
+            </syscheck>
+          </ossec_config>
+      notify: Reiniciar wazuh-manager
+
+    # =========================================================================
+    # 3. REGLAS LOCALES: archivos críticos -> nivel 12 (siempre genera correo)
+    # =========================================================================
+    - name: local_rules.xml - reglas FIM críticas
+      ansible.builtin.blockinfile:
+        path: "{{ local_rules }}"
+        marker: "<!-- {mark} ANSIBLE MANAGED: DUALNET FIM CRITICAL -->"
+        insertafter: EOF
+        backup: true
+        block: |
+          <group name="local,syscheck,fim_critical,">
+            <rule id="100100" level="12">
+              <if_sid>550,553,554</if_sid>
+              <field name="file" type="pcre2">{{ fim_critical_regex }}</field>
+              <description>FIM CRITICO: cambio en archivo sensible $(file)</description>
+            </rule>
+            <rule id="100101" level="12">
+              <if_sid>554</if_sid>
+              <field name="file" type="pcre2">^/var/www/html/.*\.(php|phtml|jsp|sh)$</field>
+              <description>FIM: nuevo script en webroot (posible webshell) $(file)</description>
+            </rule>
+          </group>
+      notify: Reiniciar wazuh-manager
+
+    # =========================================================================
+    # 4. SISTEMA: inotify (FIM realtime) y retención de logs en disco
+    # =========================================================================
+    - name: Aumentar límite de watches de inotify (necesario para realtime)
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-wazuh-inotify.conf
+        content: "fs.inotify.max_user_watches = 524288\n"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Aplicar sysctl
+
+    - name: Retención de alerts/archives (evita llenar el disco)
+      ansible.builtin.cron:
+        name: "wazuh-limpieza-logs"
+        minute: "30"
+        hour: "3"
+        user: root
+        job: "find /var/ossec/logs/alerts /var/ossec/logs/archives -type f -mtime +{{ log_retention_days }} -delete"
+
+    # =========================================================================
+    # 5. VALIDAR ANTES DE REINICIAR (si falla, los handlers NO se ejecutan)
+    # =========================================================================
+    - name: Validar configuración y reglas (wazuh-analysisd -t)
+      ansible.builtin.command: /var/ossec/bin/wazuh-analysisd -t
+      changed_when: false
+
+    - name: Aplicar reinicios pendientes ahora (antes de verificar)
+      ansible.builtin.meta: flush_handlers
+
+    # =========================================================================
+    # 6. VERIFICACIÓN FINAL
+    # =========================================================================
+    - name: Asegurar wazuh-manager habilitado y en ejecución
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        enabled: true
+        state: started
+
+    - name: Verificar que wazuh-manager esté activo
+      ansible.builtin.command: systemctl is-active wazuh-manager
+      register: wm_state
+      changed_when: false
+      failed_when: false
+      retries: 6
+      delay: 5
+      until: wm_state.stdout == 'active'
+
+    - name: Fallar si wazuh-manager no quedó activo
+      ansible.builtin.assert:
+        that: wm_state.stdout == 'active'
+        fail_msg: "wazuh-manager NO está activo tras el reinicio. Revisar /var/ossec/logs/ossec.log"
+        success_msg: "wazuh-manager activo"
+
+    - name: Verificar que los logs de alertas existan
+      ansible.builtin.wait_for:
+        path: "{{ item }}"
+        state: present
+        timeout: 60
+      loop:
+        - /var/ossec/logs/alerts/alerts.log
+        - /var/ossec/logs/alerts/alerts.json
+
+    - name: Revisar errores recientes de syscheck/maild en ossec.log
+      ansible.builtin.shell: >
+        grep -E "ERROR|CRITICAL" /var/ossec/logs/ossec.log | grep -Ei "syscheck|mail|smtp|config" | tail -n 5 || true
+      register: ossec_errors
+      changed_when: false
+
+    - name: Mostrar errores detectados (si los hay)
       ansible.builtin.debug:
-        msg: "Ejecutando en {{ inventory_hostname }}"
+        msg: "{{ ossec_errors.stdout_lines }}"
+      when: ossec_errors.stdout | length > 0
+
+    # =========================================================================
+    # 7. INSTRUCCIONES MANUALES (UI de Wazuh) - el playbook no puede hacerlas
+    # =========================================================================
+    - name: "INSTRUCCIONES UI - Dashboard personalizado"
+      ansible.builtin.debug:
+        msg:
+          - "=== DASHBOARD: https://<IP_WAZUH> (index pattern: wazuh-alerts-*) ==="
+          - "Menu -> Visualize -> Create visualization:"
+          - "1) Top 10 alertas por severidad: Data table | Metric: Count | Split rows: Terms rule.level (desc, size 10) + Terms rule.description (size 10). Guardar como 'Top10 Alertas por Severidad'."
+          - "2) Mapa de ataques: Coordinate Map | Buckets: Geo coordinates -> Geohash -> campo GeoLocation.location. Solo geolocaliza IPs publicas (las 192.168.x no aparecen)."
+          - "3) Estado de agentes: en vivo en Wazuh -> Endpoints Summary. Para el dashboard: Data table con Terms agent.name + Max @timestamp (ultimo evento) y panel con reglas 504/506 (agente desconectado)."
+          - "Menu -> Dashboards -> Create new dashboard -> Add -> seleccionar las 3 visualizaciones -> Save como 'Wazuh - SOC Overview'."
+      run_once: true
+      tags: [always]
+
+    - name: "INSTRUCCIONES UI - Reportes PDF automaticos por correo"
+      ansible.builtin.debug:
+        msg:
+          - "=== REPORTES PDF (plugins Notifications + Reporting del Dashboard) ==="
+          - "A) Menu -> Notifications -> Email senders -> Create SMTP sender: email {{ alert_email_from }}, host {{ smtp_server }}, puerto 25, encriptacion None."
+          - "B) Email recipient groups -> crear grupo con {{ alert_email_to }}."
+          - "C) Channels -> Create channel (tipo Email) con el sender y el grupo -> 'Send test message'."
+          - "D) Menu -> Reporting -> Create: origen Dashboard 'Wazuh - SOC Overview', formato PDF."
+          - "   Diario: Schedule -> Recurring -> Daily 07:00, rango Last 24 hours."
+          - "   Semanal: Schedule -> Cron based '0 7 * * 1', rango Last 7 days."
+          - "   Notification settings -> seleccionar el canal creado en C."
+          - "Nota: si el plugin rechaza 'localhost' como host SMTP, usar la IP del servidor y permitir esa interfaz en el relay."
+          - "Recomendacion: rotar las contrasenas admin y kibanaserver cada 90 dias y definir una politica ISM para borrar wazuh-alerts-* tras 90 dias."
+      run_once: true
+      tags: [always]
+
+  # ===========================================================================
+  # HANDLERS
+  # ===========================================================================
+  handlers:
+    - name: Aplicar sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+    - name: Reiniciar wazuh-manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
