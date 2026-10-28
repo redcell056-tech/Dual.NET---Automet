@@ -3,7 +3,7 @@
   hosts: all
   gather_facts: yes
   become: yes  
-    
+     
   vars:
     ansible_become_password: "!Urielito2001"
     telegram_token: "8957456397:AAEwR8owswIu4lZXsH9hJpQ95qjyDxgmPjM"
