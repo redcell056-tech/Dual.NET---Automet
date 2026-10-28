@@ -10,7 +10,7 @@
     telegram_chat_id: "8452374099"
     upgrade_system: false
     ssh_allowed_users:
-      - redcell
+      - redcell 
     ssh_harden: true
     ssh_service: ssh
     f2b_maxretry: 2
