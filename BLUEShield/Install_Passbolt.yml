@@ -84,7 +84,7 @@
       loop: [nginx, php8.3-fpm]
       failed_when: false
 
-    - name: 1.4 Purgar paquete passbolt-ce-server (ahora APT ya no tiene conflicto)
+    - name: 1.4 Purgar paquete passbolt-ce-server
       ansible.builtin.apt:
         name: passbolt-ce-server
         state: absent
@@ -137,20 +137,18 @@
         state: started
         enabled: true
 
-    # ============ 3. REPOSITORIO PASSBOLT (SUITE focal) ============
-    - name: 3.1 Importar clave GPG de Passbolt
-      ansible.builtin.shell: |
-        curl -fsSL https://download.passbolt.com/pub.key | gpg --dearmor -o /usr/share/keyrings/passbolt-archive-keyring.gpg
-      args:
-        creates: /usr/share/keyrings/passbolt-archive-keyring.gpg
-      changed_when: true
+    # ============ 3. REPOSITORIO PASSBOLT (SCRIPT OFICIAL) ============
+    - name: 3.1 Descargar script oficial del repositorio
+      ansible.builtin.get_url:
+        url: "https://download.passbolt.com/ce/installer/passbolt-repo-setup.ce.sh"
+        dest: "/tmp/passbolt-repo-setup.ce.sh"
+        mode: '0755'
 
-    - name: 3.2 Añadir repositorio de Passbolt (focal, compatible con noble)
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/passbolt.list
-        content: |
-          deb [signed-by=/usr/share/keyrings/passbolt-archive-keyring.gpg] https://download.passbolt.com/ce/ubuntu focal main
-        mode: '0644'
+    - name: 3.2 Ejecutar script oficial del repositorio
+      ansible.builtin.command:
+        cmd: bash /tmp/passbolt-repo-setup.ce.sh
+        chdir: /tmp
+        creates: /etc/apt/sources.list.d/passbolt.list
 
     - name: 3.3 Actualizar cache APT con repositorio de Passbolt
       ansible.builtin.apt:
