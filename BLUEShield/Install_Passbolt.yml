@@ -123,7 +123,7 @@
         state: started
         enabled: true
 
-    # ============ 3. REPOSITORIO PASSBOLT (MANUAL, SIN SCRIPT) ============
+    # ============ 3. REPOSITORIO PASSBOLT (MANUAL, SUITE focal) ============
     - name: 3.1 Importar clave GPG de Passbolt
       ansible.builtin.shell: |
         curl -fsSL https://download.passbolt.com/pub.key | gpg --dearmor -o /usr/share/keyrings/passbolt-archive-keyring.gpg
@@ -131,11 +131,11 @@
         creates: /usr/share/keyrings/passbolt-archive-keyring.gpg
       changed_when: true
 
-    - name: 3.2 Añadir repositorio de Passbolt para Ubuntu noble
+    - name: 3.2 Añadir repositorio de Passbolt (suite focal, compatible con noble)
       ansible.builtin.copy:
         dest: /etc/apt/sources.list.d/passbolt.list
         content: |
-          deb [signed-by=/usr/share/keyrings/passbolt-archive-keyring.gpg] https://download.passbolt.com/ce/ubuntu noble main
+          deb [signed-by=/usr/share/keyrings/passbolt-archive-keyring.gpg] https://download.passbolt.com/ce/ubuntu focal main
         mode: '0644'
 
     - name: 3.3 Actualizar cache APT con repositorio de Passbolt
