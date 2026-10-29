@@ -4,7 +4,7 @@
   gather_facts: no
   
   vars:
-    vm_name: "ubuntu-wazuh"
+    vm_name: "ubuntu-passbolt"
     datastore: "datastore1"
     iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
     seed_dir: "/tmp/ubuntu-seed-{{ vm_name }}"
@@ -83,9 +83,9 @@
         name: "{{ vm_name }}"
         guest_id: "ubuntu64Guest"
         datastore: "{{ datastore }}"
-        # --- AQUÍ ESTÁN LOS CAMBIOS: 8GB RAM y 50GB DISCO ---
+        # --- RAM Y DISCO ---
         hardware: { memory_mb: 8192, num_cpus: 4 }
-        disk: [{ size_gb: 50, type: thin }]
+        disk: [{ size_gb: 80, type: thin }]  # <--- DISCO A 80 GB
         networks: [{ name: "VM Network", device_type: "vmxnet3" }]
         cdrom: [{ type: "iso", iso_path: "{{ vm_name }}/{{ seed_iso_datastore }}" }]
         state: present
@@ -118,7 +118,6 @@
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
         for i in $(seq 1 240); do
           STATE=$(vim-cmd vmsvc/get.guest $VMID | grep -m1 'guestState = "' | sed 's/.*guestState = "\(.*\)".*/\1/')
-          # Si la VM se apaga o se queda en estado 'poweredOff', la instalación terminó
           if [ "$STATE" == "poweredOff" ] || [ "$STATE" == "powered off" ] || [ -z "$STATE" ]; then
             echo "Instalación terminada. La VM se apagó sola."
             exit 0
@@ -133,22 +132,13 @@
     - name: Apagar VM (por si acaso), desconectar CDs y arrancar del disco duro
       shell: |
         VMID=$(vim-cmd vmsvc/getallvms | awk -v n="{{ vm_name }}" '$2 == n {print $1; exit}')
-        
-        # Forzar apagado por si sigue encendida
         vim-cmd vmsvc/power.off $VMID 2>/dev/null || true
         sleep 3
-        
         VMX="/vmfs/volumes/{{ datastore }}/{{ vm_name }}/{{ vm_name }}.vmx"
-        
-        # Desconectar los dos CD-ROMs
         sed -i 's/^ide0:0.present = .*/ide0:0.present = "FALSE"/g' "$VMX"
         sed -i 's/^ide0:1.present = .*/ide0:1.present = "FALSE"/g' "$VMX"
-        
-        # Forzar arranque desde el Disco Duro
         sed -i '/^bios.bootOrder/d' "$VMX"
         echo 'bios.bootOrder = "hdd"' >> "$VMX"
-        
-        # Recargar y Encender
         vim-cmd vmsvc/reload $VMID
         sleep 2
         vim-cmd vmsvc/power.on $VMID
