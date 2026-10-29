@@ -1,23 +1,96 @@
 ---
-- name: Instalar Passbolt CE en Ubuntu (completo, desde Ansible)
-  hosts: passbolt_server
+- name: Reinstalar Passbolt CE en Ubuntu desde cero
+  hosts: all
   become: true
   gather_facts: true
 
   vars:
-    passbolt_domain: "192.168.1.69"
-    passbolt_db_name: "passbolt"
-    passbolt_db_user: "passbolt"
-    passbolt_db_password: "!Urielito2001"
+    # Solo el dominio/IP de acceso. Sobreescribible con -e passbolt_domain=...
+    passbolt_domain: "{{ ansible_default_ipv4.address | default('localhost') }}"
+
+    # Credenciales: NO se definen aquí.
+    # Deben venir de Ansible Vault, group_vars/host_vars cifrados o -e:
+    #   -e passbolt_db_name=... -e passbolt_db_user=... -e passbolt_db_password=...
 
   tasks:
-    # ============ PRE-REQUISITOS ============
-    - name: 1. Actualizar cache APT
+    # ============ 0. VALIDAR CREDENCIALES ============
+    - name: 0.1 Verificar que las variables de BD están definidas
+      ansible.builtin.assert:
+        that:
+          - passbolt_db_name is defined and passbolt_db_name | length > 0
+          - passbolt_db_user is defined and passbolt_db_user | length > 0
+          - passbolt_db_password is defined and passbolt_db_password | length > 0
+        fail_msg: >-
+          Faltan credenciales. Defínelas con -e o desde Ansible Vault:
+          passbolt_db_name, passbolt_db_user, passbolt_db_password
+        quiet: true
+
+    - name: 0.2 Validar longitud mínima de contraseña
+      ansible.builtin.assert:
+        that:
+          - passbolt_db_password | length >= 12
+        fail_msg: "La contraseña de BD debe tener al menos 12 caracteres."
+        quiet: true
+
+    # ============ 1. LIMPIEZA / DESINSTALACIÓN PREVIA ============
+    - name: 1.1 Detener servicios de Passbolt si existen
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - nginx
+        - php8.3-fpm
+      failed_when: false
+
+    - name: 1.2 Purgar paquete passbolt-ce-server (si está instalado)
+      ansible.builtin.apt:
+        name: passbolt-ce-server
+        state: absent
+        purge: true
+        autoremove: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: 1.3 Eliminar restos de configuración de Passbolt
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/passbolt
+        - /usr/share/php/passbolt
+        - /var/lib/passbolt
+        - /var/log/passbolt
+        - /var/cache/passbolt
+        - /tmp/passbolt-repo-setup.ce.sh
+
+    - name: 1.4 Eliminar repositorio y key de Passbolt
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/passbolt.list
+        - /etc/apt/sources.list.d/passbolt-ce.list
+        - /etc/apt/trusted.gpg.d/passbolt.gpg
+        - /etc/apt/trusted.gpg.d/passbolt.asc
+        - /usr/share/keyrings/passbolt-archive-keyring.gpg
+
+    - name: 1.5 Eliminar base de datos y usuario de Passbolt
+      ansible.builtin.shell: |
+        mysql << 'SQLEOF'
+        DROP DATABASE IF EXISTS `{{ passbolt_db_name }}`;
+        DROP USER IF EXISTS '{{ passbolt_db_user }}'@'localhost';
+        FLUSH PRIVILEGES;
+        SQLEOF
+      changed_when: true
+      failed_when: false
+      no_log: true
+
+    - name: 1.6 Actualizar cache APT tras limpieza
       ansible.builtin.apt:
         update_cache: true
-        cache_valid_time: 600
 
-    - name: 2. Instalar dependencias base
+    # ============ 2. PRE-REQUISITOS ============
+    - name: 2.1 Instalar dependencias base
       ansible.builtin.apt:
         name:
           - curl
@@ -27,35 +100,27 @@
           - python3-pymysql
         state: present
 
-    - name: 3. Asegurar MySQL iniciado
+    - name: 2.2 Asegurar MySQL iniciado
       ansible.builtin.systemd:
         name: mysql
         state: started
         enabled: true
 
-    # ============ REPOSITORIO PASSBOLT ============
-    - name: 4. Verificar si passbolt ya esta instalado
-      ansible.builtin.command: dpkg -l passbolt-ce-server
-      register: passbolt_check
-      failed_when: false
-      changed_when: false
-
-    - name: 5. Descargar script del repositorio (solo si no esta instalado)
+    # ============ 3. REPOSITORIO PASSBOLT ============
+    - name: 3.1 Descargar script del repositorio oficial
       ansible.builtin.get_url:
         url: "https://download.passbolt.com/ce/installer/passbolt-repo-setup.ce.sh"
         dest: "/tmp/passbolt-repo-setup.ce.sh"
         mode: '0755'
-      when: passbolt_check.rc != 0
 
-    - name: 6. Ejecutar script del repositorio (solo si no esta instalado)
-      ansible.builtin.shell: |
-        cd /tmp && bash ./passbolt-repo-setup.ce.sh
-      args:
+    - name: 3.2 Ejecutar script del repositorio
+      ansible.builtin.command:
+        cmd: bash /tmp/passbolt-repo-setup.ce.sh
         chdir: /tmp
-      when: passbolt_check.rc != 0
+        creates: /etc/apt/sources.list.d/passbolt.list
 
-    # ============ INSTALAR PAQUETE ============
-    - name: 7. Instalar paquete passbolt-ce-server sin debconf
+    # ============ 4. INSTALAR PAQUETE ============
+    - name: 4.1 Instalar passbolt-ce-server sin debconf interactivo
       ansible.builtin.apt:
         name: passbolt-ce-server
         state: present
@@ -63,18 +128,20 @@
       environment:
         DEBIAN_FRONTEND: noninteractive
 
-    # ============ CONFIGURAR BASE DE DATOS MANUALMENTE ============
-    - name: 8. Crear base de datos y usuario en MySQL
+    # ============ 5. CONFIGURAR BASE DE DATOS ============
+    - name: 5.1 Crear base de datos y usuario en MySQL
       ansible.builtin.shell: |
         mysql << 'SQLEOF'
-        CREATE DATABASE IF NOT EXISTS {{ passbolt_db_name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE DATABASE IF NOT EXISTS `{{ passbolt_db_name }}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
         CREATE USER IF NOT EXISTS '{{ passbolt_db_user }}'@'localhost' IDENTIFIED BY '{{ passbolt_db_password }}';
-        GRANT ALL PRIVILEGES ON {{ passbolt_db_name }}.* TO '{{ passbolt_db_user }}'@'localhost';
+        GRANT ALL PRIVILEGES ON `{{ passbolt_db_name }}`.* TO '{{ passbolt_db_user }}'@'localhost';
         FLUSH PRIVILEGES;
         SQLEOF
       changed_when: true
+      no_log: true
 
-    - name: 9. Crear archivo de configuracion passbolt.php
+    # ============ 6. CONFIGURACIÓN PASSBOLT ============
+    - name: 6.1 Crear passbolt.php con permisos correctos
       ansible.builtin.copy:
         dest: /etc/passbolt/passbolt.php
         owner: www-data
@@ -96,15 +163,16 @@
                   ],
               ],
           ];
+      no_log: true
 
-    - name: 10. Ejecutar migraciones de Passbolt
-      ansible.builtin.shell: |
-        sudo -H -u www-data bash -c "/usr/share/php/passbolt/bin/cake passbolt migrate"
+    - name: 6.2 Ejecutar migraciones de Passbolt
+      ansible.builtin.command:
+        cmd: sudo -H -u www-data bash -c "/usr/share/php/passbolt/bin/cake passbolt migrate"
       register: migrate_out
       changed_when: "'No migration' not in migrate_out.stdout"
 
-    # ============ SERVICIOS ============
-    - name: 11. Asegurar servicios corriendo
+    # ============ 7. SERVICIOS ============
+    - name: 7.1 Asegurar servicios corriendo
       ansible.builtin.systemd:
         name: "{{ item }}"
         state: restarted
@@ -114,17 +182,18 @@
         - mysql
         - php8.3-fpm
 
-    - name: 12. Healthcheck final
-      ansible.builtin.shell: |
-        sudo su -s /bin/bash -c "/usr/share/php/passbolt/bin/cake passbolt healthcheck" www-data
+    # ============ 8. VERIFICACIÓN ============
+    - name: 8.1 Healthcheck final
+      ansible.builtin.command:
+        cmd: sudo -u www-data -s /bin/bash -c "/usr/share/php/passbolt/bin/cake passbolt healthcheck"
       register: healthcheck
       changed_when: false
       failed_when: false
 
-    - name: 13. Mostrar resumen del healthcheck
+    - name: 8.2 Mostrar resumen del healthcheck
       ansible.builtin.debug:
         msg: "{{ healthcheck.stdout_lines | select('search', 'OK|FAIL|WARN|PASS') | list }}"
 
-    - name: 14. Mostrar URL de acceso
+    - name: 8.3 Mostrar URL de acceso
       ansible.builtin.debug:
-        msg: "Accede en: http://{{ passbolt_domain }}"
+        msg: "Passbolt listo en: http://{{ passbolt_domain }}"
