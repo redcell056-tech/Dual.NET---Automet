@@ -8,7 +8,6 @@
     passbolt_domain: "{{ ansible_default_ipv4.address | default('localhost') }}"
     passbolt_db_name: "passbolt"
     passbolt_db_user: "passbolt"
-    # Ruta donde se guarda la contraseña generada (solo root, 0600)
     passbolt_secret_file: "/etc/passbolt/.db_password"
 
   tasks:
@@ -79,18 +78,31 @@
         - /var/cache/passbolt
         - /tmp/passbolt-repo-setup.ce.sh
 
-    - name: 1.4 Eliminar repositorio y key de Passbolt
+    - name: 1.4 Eliminar claves GPG de Passbolt
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
       loop:
-        - /etc/apt/sources.list.d/passbolt.list
-        - /etc/apt/sources.list.d/passbolt-ce.list
         - /etc/apt/trusted.gpg.d/passbolt.gpg
         - /etc/apt/trusted.gpg.d/passbolt.asc
         - /usr/share/keyrings/passbolt-archive-keyring.gpg
+        - /usr/share/keyrings/passbolt-repository.gpg
 
-    - name: 1.5 DROP DATABASE / DROP USER previos
+    - name: 1.5 Buscar cualquier archivo de repositorio residual de Passbolt
+      ansible.builtin.find:
+        paths: /etc/apt/sources.list.d/
+        patterns: "passbolt*"
+      register: passbolt_repo_files
+
+    - name: 1.6 Borrar archivos de repositorio encontrados
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ passbolt_repo_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: 1.7 DROP DATABASE / DROP USER previos
       ansible.builtin.shell: |
         mysql << 'SQLEOF'
         DROP DATABASE IF EXISTS `{{ passbolt_db_name }}`;
@@ -101,7 +113,7 @@
       failed_when: false
       no_log: true
 
-    - name: 1.6 Actualizar cache APT tras limpieza
+    - name: 1.8 Actualizar cache APT tras limpieza
       ansible.builtin.apt:
         update_cache: true
 
