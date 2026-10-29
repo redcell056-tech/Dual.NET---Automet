@@ -137,18 +137,20 @@
         state: started
         enabled: true
 
-    # ============ 3. REPOSITORIO PASSBOLT (SCRIPT OFICIAL) ============
-    - name: 3.1 Descargar script oficial del repositorio
-      ansible.builtin.get_url:
-        url: "https://download.passbolt.com/ce/installer/passbolt-repo-setup.ce.sh"
-        dest: "/tmp/passbolt-repo-setup.ce.sh"
-        mode: '0755'
+    # ============ 3. REPOSITORIO PASSBOLT (MANUAL, SIN SCRIPT) ============
+    - name: 3.1 Importar clave GPG de Passbolt (ruta oficial del repo)
+      ansible.builtin.shell: |
+        curl -fsSL https://download.passbolt.com/pub.key | gpg --dearmor -o /usr/share/keyrings/passbolt-repository.gpg
+      args:
+        creates: /usr/share/keyrings/passbolt-repository.gpg
+      changed_when: true
 
-    - name: 3.2 Ejecutar script oficial del repositorio
-      ansible.builtin.command:
-        cmd: bash /tmp/passbolt-repo-setup.ce.sh
-        chdir: /tmp
-        creates: /etc/apt/sources.list.d/passbolt.list
+    - name: 3.2 Añadir repositorio de Passbolt (suite focal)
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/passbolt.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/passbolt-repository.gpg] https://download.passbolt.com/ce/ubuntu focal main
+        mode: '0644'
 
     - name: 3.3 Actualizar cache APT con repositorio de Passbolt
       ansible.builtin.apt:
