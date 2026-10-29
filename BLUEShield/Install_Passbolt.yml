@@ -8,7 +8,7 @@
     passbolt_domain: "{{ ansible_default_ipv4.address | default('localhost') }}"
     passbolt_db_name: "passbolt"
     passbolt_db_user: "passbolt"
-    # Ruta donde se guardará la contraseña generada (solo root, 0600)
+    # Ruta donde se guarda la contraseña generada (solo root, 0600)
     passbolt_secret_file: "/etc/passbolt/.db_password"
 
   tasks:
@@ -101,7 +101,7 @@
       failed_when: false
       no_log: true
 
-    - name: 1.6 Actualizar cache APT
+    - name: 1.6 Actualizar cache APT tras limpieza
       ansible.builtin.apt:
         update_cache: true
 
@@ -112,6 +112,7 @@
           - curl
           - gnupg
           - ca-certificates
+          - apt-transport-https
           - mysql-server
           - python3-pymysql
         state: present
@@ -122,21 +123,27 @@
         state: started
         enabled: true
 
-    # ============ 3. REPOSITORIO PASSBOLT ============
-    - name: 3.1 Descargar script del repositorio
-      ansible.builtin.get_url:
-        url: "https://download.passbolt.com/ce/installer/passbolt-repo-setup.ce.sh"
-        dest: "/tmp/passbolt-repo-setup.ce.sh"
-        mode: '0755'
+    # ============ 3. REPOSITORIO PASSBOLT (MANUAL, SIN SCRIPT) ============
+    - name: 3.1 Importar clave GPG de Passbolt
+      ansible.builtin.shell: |
+        curl -fsSL https://download.passbolt.com/pub.key | gpg --dearmor -o /usr/share/keyrings/passbolt-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/passbolt-archive-keyring.gpg
+      changed_when: true
 
-    - name: 3.2 Ejecutar script del repositorio
-      ansible.builtin.command:
-        cmd: bash /tmp/passbolt-repo-setup.ce.sh
-        chdir: /tmp
-        creates: /etc/apt/sources.list.d/passbolt.list
+    - name: 3.2 Añadir repositorio de Passbolt para Ubuntu noble
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/passbolt.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/passbolt-archive-keyring.gpg] https://download.passbolt.com/ce/ubuntu noble main
+        mode: '0644'
+
+    - name: 3.3 Actualizar cache APT con repositorio de Passbolt
+      ansible.builtin.apt:
+        update_cache: true
 
     # ============ 4. INSTALAR PAQUETE ============
-    - name: 4.1 Instalar passbolt-ce-server
+    - name: 4.1 Instalar passbolt-ce-server sin debconf interactivo
       ansible.builtin.apt:
         name: passbolt-ce-server
         state: present
