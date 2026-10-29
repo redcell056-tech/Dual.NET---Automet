@@ -4,7 +4,7 @@
   gather_facts: no
   
   vars:
-    vm_name: "ubuntu-wazuh"
+    vm_name: "ubuntu-openscap"
     datastore: "datastore1"
     iso_rel_path: "ISOS/ubuntu-24.04.2-live-server-amd64.iso"
     seed_dir: "/tmp/ubuntu-seed-{{ vm_name }}"
