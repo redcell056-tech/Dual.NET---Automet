@@ -93,7 +93,7 @@
       environment:
         DEBIAN_FRONTEND: noninteractive
 
-    - name: 1.5 Eliminar restos de configuración
+    - name: 1.5 Eliminar restos de configuración de Passbolt
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
@@ -103,6 +103,7 @@
         - /var/log/passbolt
         - /var/cache/passbolt
         - /tmp/passbolt-repo-setup.ce.sh
+        - /tmp/passbolt-ce-SHA512SUM.txt
 
     - name: 1.6 DROP DATABASE / DROP USER previos
       ansible.builtin.shell: |
@@ -115,18 +116,32 @@
       failed_when: false
       no_log: true
 
-    - name: 1.7 Actualizar cache APT tras limpieza
+    # ============ 1.7 LIMPIEZA CRÍTICA: ELIMINAR PHP Y NGINX EXISTENTES ============
+    # El script oficial requiere un servidor "vanilla". Si PHP ya está instalado,
+    # el script aborta con "PHP is already installed, you must execute this script on a vanilla server".
+    - name: 1.7 Purgar PHP, Nginx y paquetes relacionados (excepto MySQL)
+      ansible.builtin.apt:
+        name:
+          - php*
+          - nginx*
+          - libapache2-mod-php*
+        state: absent
+        purge: true
+        autoremove: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: 1.8 Actualizar cache APT tras limpieza profunda
       ansible.builtin.apt:
         update_cache: true
 
-    # ============ 2. PRE-REQUISITOS ============
-    - name: 2.1 Instalar dependencias base
+    # ============ 2. PRE-REQUISITOS MÍNIMOS (SOLO LO QUE EL SCRIPT NECESITA) ============
+    - name: 2.1 Instalar dependencias base mínimas
       ansible.builtin.apt:
         name:
           - curl
           - gnupg
           - ca-certificates
-          - apt-transport-https
           - mysql-server
           - python3-pymysql
         state: present
@@ -137,22 +152,34 @@
         state: started
         enabled: true
 
-    # ============ 3. REPOSITORIO PASSBOLT (MANUAL, SIN SCRIPT) ============
-    - name: 3.1 Importar clave GPG de Passbolt (ruta oficial del repo)
-      ansible.builtin.shell: |
-        curl -fsSL https://download.passbolt.com/pub.key | gpg --dearmor -o /usr/share/keyrings/passbolt-repository.gpg
-      args:
-        creates: /usr/share/keyrings/passbolt-repository.gpg
-      changed_when: true
+    # ============ 3. REPOSITORIO PASSBOLT (SCRIPT OFICIAL CON CHECKSUM) ============
+    - name: 3.1 Descargar script oficial del repositorio
+      ansible.builtin.get_url:
+        url: "https://download.passbolt.com/ce/installer/passbolt-repo-setup.ce.sh"
+        dest: "/tmp/passbolt-repo-setup.ce.sh"
+        mode: '0755'
 
-    - name: 3.2 Añadir repositorio de Passbolt (suite focal)
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/passbolt.list
-        content: |
-          deb [signed-by=/usr/share/keyrings/passbolt-repository.gpg] https://download.passbolt.com/ce/ubuntu focal main
+    - name: 3.2 Descargar checksum oficial
+      ansible.builtin.get_url:
+        url: "https://github.com/passbolt/passbolt-dep-scripts/releases/latest/download/passbolt-ce-SHA512SUM.txt"
+        dest: "/tmp/passbolt-ce-SHA512SUM.txt"
         mode: '0644'
 
-    - name: 3.3 Actualizar cache APT con repositorio de Passbolt
+    - name: 3.3 Verificar checksum del script
+      ansible.builtin.command:
+        cmd: sha512sum -c passbolt-ce-SHA512SUM.txt
+        chdir: /tmp
+      register: checksum_result
+      changed_when: false
+      failed_when: "'OK' not in checksum_result.stdout"
+
+    - name: 3.4 Ejecutar script oficial del repositorio
+      ansible.builtin.command:
+        cmd: bash /tmp/passbolt-repo-setup.ce.sh
+        chdir: /tmp
+        creates: /etc/apt/sources.list.d/passbolt.list
+
+    - name: 3.5 Actualizar cache APT con repositorio de Passbolt
       ansible.builtin.apt:
         update_cache: true
 
