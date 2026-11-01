@@ -1,7 +1,7 @@
 ---
 - name: Descubrimiento automático de hosts y registro en Dual.NET
   hosts: all 
-  connection: local
+  connection: local 
   gather_facts: no
 
   vars:
