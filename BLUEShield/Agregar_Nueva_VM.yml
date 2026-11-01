@@ -1,0 +1,75 @@
+---
+- name: Descubrimiento automático de hosts y registro en Dual.NET
+  hosts: all
+  connection: local
+  gather_facts: no
+
+  vars:
+    red_a_escanear: "192.168.1.0/24"
+    db_host: "dualnet-automation-postgres-1"
+    db_user: "{{ lookup('env', 'POSTGRES_USER') }}"
+    db_pass: "{{ lookup('env', 'POSTGRES_PASSWORD') }}"
+    db_name: "{{ lookup('env', 'POSTGRES_DB') }}"
+    usuario_ssh: "redcell"
+    password_ssh: "!Urielito2001"
+    id_credencial: 2
+    id_inventario: 1
+
+  tasks:
+    - name: Escanear la red para encontrar IPs activas
+      ansible.builtin.command:
+        cmd: "nmap -sn {{ red_a_escanear }} -oG -"
+      register: nmap_result
+      changed_when: false
+
+    - name: Extraer IPs activas
+      ansible.builtin.set_fact:
+        ips_activas: "{{ nmap_result.stdout_lines | select('search', 'Status: Up') | map('regex_replace', '^Host: (\\S+).*', '\\1') | list }}"
+
+    - name: Obtener IPs ya registradas en la BD
+      ansible.builtin.shell: |
+        PGPASSWORD='{{ db_pass }}' psql -h {{ db_host }} -U {{ db_user }} -d {{ db_name }} -t -c "SELECT ip_address FROM hosts WHERE ip_address IS NOT NULL;"
+      register: ips_registradas
+      changed_when: false
+
+    - name: Calcular IPs nuevas
+      ansible.builtin.set_fact:
+        ips_nuevas: "{{ ips_activas | difference(ips_registradas.stdout_lines | map('trim') | list) }}"
+
+    # --- VERIFICAR PUERTO 22 ANTES DE INTENTAR SSH ---
+    - name: Verificar si el puerto 22 está abierto en las IPs nuevas
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 22
+        timeout: 2
+        state: started
+      loop: "{{ ips_nuevas }}"
+      register: port_check
+      ignore_errors: yes
+      changed_when: false
+
+    # --- SOLO HACER SSH EN LAS QUE TIENEN EL PUERTO 22 ABIERTO ---
+    - name: Probar SSH solo en hosts con puerto 22 abierto
+      ansible.builtin.shell: |
+        sshpass -p '{{ password_ssh }}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 {{ usuario_ssh }}@{{ item.item }} "hostname"
+      loop: "{{ port_check.results | selectattr('failed', 'eq', false) | list }}"
+      register: ssh_results
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Registrar hosts exitosos en la base de datos
+      ansible.builtin.shell: |
+        HOSTNAME="{{ item.stdout | trim }}"
+        IP="{{ item.item.item }}"
+        PGPASSWORD='{{ db_pass }}' psql -h {{ db_host }} -U {{ db_user }} -d {{ db_name }} -c "
+          INSERT INTO hosts (name, ip_address, ssh_user, credential_id, inventory_id, ansible_groups, connectivity_status)
+          VALUES ('$HOSTNAME', '$IP', '{{ usuario_ssh }}', {{ id_credencial }}, {{ id_inventario }}, 'linux', 'unknown')
+          ON CONFLICT DO NOTHING;
+        "
+        echo "✅ Registrado: $HOSTNAME ($IP)"
+      loop: "{{ ssh_results.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 0) | list }}"
+      changed_when: true
+
+    - name: Mostrar resumen final
+      ansible.builtin.debug:
+        msg: "Hosts nuevos registrados: {{ ssh_results.results | selectattr('rc', 'defined') | selectattr('rc', 'eq', 0) | map(attribute='stdout') | list }}"
