@@ -12,8 +12,8 @@
     nessus_deb_file: "Nessus-10.12.6-ubuntu1604_amd64.deb"
     nessus_download_url: "https://www.tenable.com/downloads/api/v2/pages/nessus/files/{{ nessus_deb_file }}"
     
-    # --- CÓDIGO DE ACTIVACIÓN REAL ---
-    nessus_activation_code: "S9VL-CVBY-WMCV-BYWK-4SKF"
+    # --- NUEVO CÓDIGO DE ACTIVACIÓN ---
+    nessus_activation_code: "BBM8-8FGY-HJ7A-S58Q-XGKE"
 
   tasks:
     # 1. INSTALAR DEPENDENCIAS
