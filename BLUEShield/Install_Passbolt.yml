@@ -1,10 +1,13 @@
 ---
 - name: Reinstalar Passbolt CE en Ubuntu desde cero (repositorio manual)
-  hosts: all
+  hosts: ubuntu-passbolt  # <--- Solo se ejecuta en la máquina de Passbolt
   become: true
   gather_facts: true
 
   vars:
+    # --- CONTRASEÑA DE SUDO ---
+    ansible_become_password: "{{ ansible_password }}"
+    
     passbolt_domain: "{{ ansible_default_ipv4.address | default('localhost') }}"
     passbolt_db_name: "passbolt"
     passbolt_db_user: "passbolt"
