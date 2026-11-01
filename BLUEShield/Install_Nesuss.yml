@@ -1,11 +1,11 @@
 ---
 - name: Instalar Tenable Nessus en Ubuntu
-  hosts: all
+  hosts: nessus
   gather_facts: yes
   become: yes
   
   vars:
-    # --- CONTRASEÑA PARA SUDO ---
+    # --- CONTRASEÑA PARA SUDO (usando la del inventario) ---
     ansible_become_password: "{{ ansible_password }}"
     
     # --- URL EXACTA QUE FUNCIONA (versión 10.12.6) ---
@@ -46,18 +46,28 @@
         state: started
         enabled: yes
 
-    # 5. REGISTRAR LA LICENCIA (ACTIVACIÓN CON CÓDIGO REAL)
-    - name: Registrar Nessus con el código de activación
+    # 5. REGISTRAR LA LICENCIA (SIN DESCARGAR PLUGINS AÚN)
+    - name: Registrar Nessus con el código de activación (solo registro)
       ansible.builtin.command: >
-        /opt/nessus/sbin/nessuscli fetch --register {{ nessus_activation_code }}
+        /opt/nessus/sbin/nessuscli fetch --register-only {{ nessus_activation_code }}
       register: nessus_register_output
       changed_when: "'Thank you' in nessus_register_output.stdout or 'registered' in nessus_register_output.stdout"
       failed_when: nessus_register_output.rc != 0
 
-    # 6. MOSTRAR INFORMACIÓN DE ACCESO
+    # 6. (OPCIONAL) FORZAR LA DESCARGA DE PLUGINS DESPUÉS
+    # Si el servidor tiene internet, puedes descomentar esta tarea para que baje los plugins.
+    # Si no tiene internet, déjala comentada para evitar el error HTTP 400.
+    # - name: Descargar plugins de Nessus
+    #   ansible.builtin.command: >
+    #     /opt/nessus/sbin/nessuscli update --plugins-only
+    #   register: nessus_plugins_output
+    #   changed_when: false
+    #   failed_when: nessus_plugins_output.rc != 0
+
+    # 7. MOSTRAR INFORMACIÓN DE ACCESO
     - name: Mostrar la URL de acceso a Nessus
       ansible.builtin.debug:
         msg:
           - "Nessus se ha instalado y registrado correctamente."
           - "Accede a la interfaz web en: https://{{ ansible_default_ipv4.address }}:8834"
-          - "Espera unos minutos mientras se descargan los plugins iniciales."
+          - "Espera unos minutos mientras se descargan los plugins iniciales (si aplica)."
